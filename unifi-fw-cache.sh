@@ -46,18 +46,87 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
 
-Режим контроллера:
-  --from-catalog           кэшировать прошивки в /var/lib/unifi/firmware
-  --filter "REGEX"         фильтр (напр. "^(UAP|US)" для AP и Switch)
-  --codes "CODES"          список кодов вручную ("U7PG2 UAP6MP")
-  
-Режим зеркала:
-  --mirror-all             создать зеркало файлов
-  --mirror-root PATH       путь для зеркала (напр. /root/unifi-cache)
+🎮 Режим контроллера:
+  --from-catalog              Кэшировать прошивки из firmware.json
+  --filter "REGEX"            Фильтр устройств (напр. "^(UAP|US)" для AP и Switch)
+  --codes "CODES"             Список кодов устройств ("U7PG2 UAP6MP UAL6")
+  --catalog PATH              Путь к firmware.json (default: /var/lib/unifi/firmware.json)
+  --app-version VERSION       Версия контроллера (default: auto)
 
-Опции:
-  --threads N              потоков (default: 5)
-  --no-restart             не перезапускать unifi
+🌐 Режим зеркала:
+  --mirror-all                Создать полное зеркало прошивок
+  --mirror-root PATH          Корневая директория зеркала (default: .)
+  --rewrite-host HOST         Заменить хост при скачивании (для прокси/зеркала)
+
+📋 Обновление каталога:
+  --update-catalog            Обновить firmware.json и выйти
+  --auto-update-catalog       Автообновление каталога при запуске (если устарел)
+  --catalog-url URL           URL источника каталога
+                              (default: https://fw-download.ubnt.com/data/firmware.json)
+  --rewrite-catalog-host HOST Заменить хост в URL каталога (напр. fw-download.n78.ru)
+  --max-catalog-age DAYS      Максимальный возраст каталога в днях (default: 20)
+  --no-catalog-backup         Не создавать резервную копию при обновлении
+
+🔧 Дополнительные опции:
+  --src-dir PATH              Директория с локальными файлами прошивок
+  --src-url URL [FILE]        Сопоставить URL с локальным файлом
+  --threads N                 Количество параллельных загрузок (default: 5)
+  --no-restart                Не перезапускать службу unifi
+  --dev-family CODE           Принудительно указать семейство устройства
+  --version VERSION           Принудительно указать версию прошивки
+  -h, --help                  Показать эту справку
+
+📝 Переменные окружения:
+  UNIFI_FW_DIR                Директория кэша (default: /var/lib/unifi/firmware)
+  CATALOG                     Путь к firmware.json (default: /var/lib/unifi/firmware.json)
+  CATALOG_URL                 URL источника каталога
+  APP_VERSION                 Версия контроллера (default: auto)
+  UNIFI_USER                  Владелец файлов (default: unifi)
+  UNIFI_GROUP                 Группа файлов (default: unifi)
+  RESTART                     Перезапускать unifi (1/0, default: 1)
+  REWRITE_HOST                Заменить хост при загрузке прошивок
+  REWRITE_CATALOG_HOST        Заменить хост в каталоге
+  MIRROR_ROOT                 Корень зеркала (default: .)
+  DOWNLOAD_THREADS            Количество потоков (default: 5)
+  MAX_CATALOG_AGE             Максимальный возраст каталога в днях (default: 20)
+  CATALOG_BACKUP              Делать резервные копии (1/0, default: 1)
+
+💡 Примеры использования:
+
+  # Кэшировать прошивки для конкретных устройств
+  sudo ./$(basename "$0") --from-catalog --codes "UAP6MP U7PG2 UAL6"
+
+  # Скачать прошивку по прямому URL (автоопределение совместимых устройств)
+  sudo ./$(basename "$0") https://dl.ui.com/unifi/firmware/U7PG2/6.7.35.15586/file.bin
+
+  # Несколько прошивок за раз
+  sudo ./$(basename "$0") url1.bin url2.bin url3.bin --threads 10
+
+  # Обновить firmware.json с переписыванием хостов
+  sudo ./$(basename "$0") --update-catalog \\
+    --catalog-url https://fw-download.n78.ru/firmware.json \\
+    --rewrite-catalog-host fw-download.n78.ru
+
+  # Автообновление каталога при скачивании прошивок
+  sudo ./$(basename "$0") --auto-update-catalog --from-catalog --codes "U7PG2"
+
+  # Создать зеркало с обновлённым каталогом
+  ./$(basename "$0") --update-catalog \\
+    --catalog-url https://fw-download.ubnt.com/data/firmware.json \\
+    --rewrite-catalog-host fw-download.n78.ru \\
+    --mirror-all --mirror-root /srv/unifi-mirror
+
+  # Добавить локальные файлы в кэш
+  sudo ./$(basename "$0") --src-dir /path/to/firmware-files/
+
+  # Использовать внутреннее зеркало
+  REWRITE_HOST=mirror.local sudo -E ./$(basename "$0") --from-catalog --codes "UAP6MP"
+
+📚 Документация:
+  README.md           - Основная документация
+  CATALOG_UPDATE.md   - Руководство по обновлению каталога
+
+🔗 Подробнее: https://github.com/nimbo78/unifi-fw-cache
 EOF
 }
 
