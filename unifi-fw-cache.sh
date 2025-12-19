@@ -304,12 +304,17 @@ process_manual_sources() {
     done
     shopt -u nullglob
   fi
+
+  # Сбор информации о скачиваемых URL для последующего добавления метаданных
+  local -a downloaded_urls=()
+
   for s in "${EXTRA_SOURCES[@]}"; do
      local code ver; IFS='|' read -r code ver < <(infer_family_version "$s")
      if [[ "$s" =~ ^https?:// ]]; then
        if [[ -n "$code" && -n "$ver" ]]; then
          local dst="$UNIFI_FW_DIR/$code/$ver/$(basename "$s")"
          queue_download "$s" "$dst"
+         downloaded_urls+=("$code|$ver|$dst")
        fi
      else
        [[ -n "$code" && -n "$ver" ]] && {
@@ -330,7 +335,18 @@ process_manual_sources() {
        echo "[SRC-URL] $code $ver <- $file"
     fi
   done
+
   process_download_queue
+
+  # Добавление метаданных для скачанных файлов
+  for entry in "${downloaded_urls[@]}"; do
+    IFS='|' read -r code ver dst <<< "$entry"
+    if [[ -f "$dst" ]]; then
+      local rel_path="$code/$ver/$(basename "$dst")"
+      add_meta_buffer "$rel_path" "$ver" "$code" "$dst"
+      echo "[URL] $code $ver <- $(basename "$dst")"
+    fi
+  done
 }
 
 main() {
