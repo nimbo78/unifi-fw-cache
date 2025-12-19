@@ -532,9 +532,15 @@ mirror_all() {
   elif [[ -r "$CATALOG" ]]; then
     echo "📋 Используется системный каталог: $CATALOG"
   else
-    echo "❌ Каталог не найден ни в зеркале ($mirror_catalog), ни в системе ($CATALOG)" >&2
-    echo "💡 Подсказка: используйте --update-catalog для скачивания каталога" >&2
-    exit 1
+    echo "⚠️ Каталог не найден ни в зеркале ($mirror_catalog), ни в системе ($CATALOG)" >&2
+    echo "🔄 Автоматическая загрузка каталога с $CATALOG_URL..." >&2
+    if update_catalog "$CATALOG_URL" "$mirror_catalog" "$REWRITE_CATALOG_HOST" "0"; then
+      echo "✅ Каталог успешно загружен: $mirror_catalog"
+      CATALOG="$mirror_catalog"
+    else
+      echo "❌ Не удалось загрузить каталог" >&2
+      exit 1
+    fi
   fi
 
   auto_detect_app_version
