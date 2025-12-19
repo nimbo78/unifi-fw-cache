@@ -517,18 +517,25 @@ process_from_catalog() {
 
 mirror_all() {
   local root="$MIRROR_ROOT"
+  local mirror_catalog="$root/firmware.json"
 
-  # Если нужно обновить каталог и сохранить в зеркало
+  # Если нужно обновить каталог
   if [[ $UPDATE_CATALOG -eq 1 ]]; then
-    local mirror_catalog="$root/firmware.json"
     echo "📦 Обновление каталога для зеркала..."
     update_catalog "$CATALOG_URL" "$mirror_catalog" "$REWRITE_CATALOG_HOST" "$CATALOG_BACKUP"
-    # Использовать обновлённый каталог для зеркалирования
-    CATALOG="$mirror_catalog"
   fi
 
-  # Проверка каталога после возможного обновления
-  [[ -r "$CATALOG" ]] || { echo "Каталог не найден: $CATALOG" >&2; exit 1; }
+  # Для зеркала приоритетно используем каталог из целевой папки зеркала
+  if [[ -r "$mirror_catalog" ]]; then
+    echo "📋 Используется каталог из зеркала: $mirror_catalog"
+    CATALOG="$mirror_catalog"
+  elif [[ -r "$CATALOG" ]]; then
+    echo "📋 Используется системный каталог: $CATALOG"
+  else
+    echo "❌ Каталог не найден ни в зеркале ($mirror_catalog), ни в системе ($CATALOG)" >&2
+    echo "💡 Подсказка: используйте --update-catalog для скачивания каталога" >&2
+    exit 1
+  fi
 
   auto_detect_app_version
   local jq_filter='.[$v].release | .[].url + "\t" + .[].md5sum'
