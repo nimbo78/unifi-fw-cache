@@ -122,15 +122,73 @@ install_file() {
   else cp "$src" "$dst" && chmod "$mode" "$dst"; fi
 }
 
+find_compatible_devices() {
+  local url="$1" md5="${2:-}" ver="${3:-}"
+  local catalog="${CATALOG:-/var/lib/unifi/firmware.json}"
+  local app_version="${APP_VERSION:-}"
+
+  # Если каталог недоступен, возвращаем пустую строку (будет использован fallback)
+  [[ ! -f "$catalog" ]] && return 0
+
+  # Автоопределение версии приложения
+  if [[ -z "$app_version" || "$app_version" == "auto" ]]; then
+    app_version=$(jq -r 'keys[]' "$catalog" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+' | sort -V | tail -n1 || true)
+  fi
+  [[ -z "$app_version" ]] && return 0
+
+  local devices=""
+
+  # Приоритет 1: Поиск по MD5 (самый надёжный)
+  if [[ -n "$md5" ]]; then
+    devices=$(jq -r --arg v "$app_version" --arg md5 "$md5" '
+      .[$v].release | to_entries[] | select(.value.md5sum == $md5) | .key
+    ' "$catalog" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
+  fi
+
+  # Приоритет 2: Поиск по имени файла и версии
+  if [[ -z "$devices" && -n "$url" && -n "$ver" ]]; then
+    local filename; filename="$(basename "$url")"
+    devices=$(jq -r --arg v "$app_version" --arg fname "$filename" --arg fver "$ver" '
+      .[$v].release | to_entries[] |
+      select(.value.url | endswith($fname)) |
+      select(.value.version == $fver) |
+      .key
+    ' "$catalog" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
+  fi
+
+  # Приоритет 3: Поиск только по имени файла
+  if [[ -z "$devices" && -n "$url" ]]; then
+    local filename; filename="$(basename "$url")"
+    devices=$(jq -r --arg v "$app_version" --arg fname "$filename" '
+      .[$v].release | to_entries[] |
+      select(.value.url | endswith($fname)) |
+      .key
+    ' "$catalog" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
+  fi
+
+  echo "$devices"
+}
+
 add_meta_buffer() {
   [[ $NEED_CONTROLLER -eq 1 ]] || return 0
-  local rel="$1" ver="$2" code="$3" file="$4"
+  local rel="$1" ver="$2" codes="$3" file="$4"
   if [[ -f "$file" ]]; then
     local md5 size
     md5="$(md5sum "$file" | awk '{print $1}')"
     size="$(stat -c%s "$file")"
-    jq -n -c --arg md5 "$md5" --arg ver "$ver" --argjson size "$size" --arg path "$rel" --arg code "$code" \
-          '{md5:$md5, version:$ver, size:$size, path:$path, devices:[$code]}' >> "$TEMP_META_FILE"
+
+    # Преобразуем строку кодов (через пробел) в JSON массив
+    local devices_json
+    if [[ "$codes" == *" "* ]]; then
+      # Несколько кодов - создаём массив
+      devices_json=$(printf '%s\n' $codes | jq -R . | jq -s .)
+    else
+      # Один код - тоже массив
+      devices_json=$(jq -n -c --arg code "$codes" '[$code]')
+    fi
+
+    jq -n -c --arg md5 "$md5" --arg ver "$ver" --argjson size "$size" --arg path "$rel" --argjson devices "$devices_json" \
+          '{md5:$md5, version:$ver, size:$size, path:$path, devices:$devices}' >> "$TEMP_META_FILE"
   fi
 }
 
@@ -298,8 +356,14 @@ process_manual_sources() {
       [[ -n "$code" && -n "$ver" ]] && {
         local dst="$UNIFI_FW_DIR/$code/$ver/$(basename "$f")"
         install_file "$f" "$dst"
-        add_meta_buffer "$code/$ver/$(basename "$f")" "$ver" "$code" "$dst"
-        echo "[LOCAL] $code $ver <- $f"
+
+        # Поиск совместимых устройств
+        local md5; md5="$(md5sum "$dst" | awk '{print $1}')"
+        local compat_devices; compat_devices=$(find_compatible_devices "$f" "$md5" "$ver")
+        local devices="${compat_devices:-$code}"  # fallback к определённому коду
+
+        add_meta_buffer "$code/$ver/$(basename "$f")" "$ver" "$devices" "$dst"
+        echo "[LOCAL] $code $ver (devices: $devices) <- $f"
       }
     done
     shopt -u nullglob
@@ -314,14 +378,20 @@ process_manual_sources() {
        if [[ -n "$code" && -n "$ver" ]]; then
          local dst="$UNIFI_FW_DIR/$code/$ver/$(basename "$s")"
          queue_download "$s" "$dst"
-         downloaded_urls+=("$code|$ver|$dst")
+         downloaded_urls+=("$code|$ver|$dst|$s")  # сохраняем URL для поиска
        fi
      else
        [[ -n "$code" && -n "$ver" ]] && {
          local dst="$UNIFI_FW_DIR/$code/$ver/$(basename "$s")"
          install_file "$s" "$dst"
-         add_meta_buffer "$code/$ver/$(basename "$s")" "$ver" "$code" "$dst"
-         echo "[FILE] $code $ver <- $s"
+
+         # Поиск совместимых устройств
+         local md5; md5="$(md5sum "$dst" | awk '{print $1}')"
+         local compat_devices; compat_devices=$(find_compatible_devices "$s" "$md5" "$ver")
+         local devices="${compat_devices:-$code}"
+
+         add_meta_buffer "$code/$ver/$(basename "$s")" "$ver" "$devices" "$dst"
+         echo "[FILE] $code $ver (devices: $devices) <- $s"
        }
      fi
   done
@@ -331,8 +401,14 @@ process_manual_sources() {
     if [[ -n "$code" && -n "$ver" && -f "$file" ]]; then
        local dst="$UNIFI_FW_DIR/$code/$ver/$(basename "$url")"
        install_file "$file" "$dst"
-       add_meta_buffer "$code/$ver/$(basename "$url")" "$ver" "$code" "$dst"
-       echo "[SRC-URL] $code $ver <- $file"
+
+       # Поиск совместимых устройств
+       local md5; md5="$(md5sum "$dst" | awk '{print $1}')"
+       local compat_devices; compat_devices=$(find_compatible_devices "$url" "$md5" "$ver")
+       local devices="${compat_devices:-$code}"
+
+       add_meta_buffer "$code/$ver/$(basename "$url")" "$ver" "$devices" "$dst"
+       echo "[SRC-URL] $code $ver (devices: $devices) <- $file"
     fi
   done
 
@@ -340,11 +416,17 @@ process_manual_sources() {
 
   # Добавление метаданных для скачанных файлов
   for entry in "${downloaded_urls[@]}"; do
-    IFS='|' read -r code ver dst <<< "$entry"
+    IFS='|' read -r code ver dst url <<< "$entry"
     if [[ -f "$dst" ]]; then
       local rel_path="$code/$ver/$(basename "$dst")"
-      add_meta_buffer "$rel_path" "$ver" "$code" "$dst"
-      echo "[URL] $code $ver <- $(basename "$dst")"
+
+      # Поиск совместимых устройств
+      local md5; md5="$(md5sum "$dst" | awk '{print $1}')"
+      local compat_devices; compat_devices=$(find_compatible_devices "$url" "$md5" "$ver")
+      local devices="${compat_devices:-$code}"
+
+      add_meta_buffer "$rel_path" "$ver" "$devices" "$dst"
+      echo "[URL] $code $ver (devices: $devices) <- $(basename "$dst")"
     fi
   done
 }
