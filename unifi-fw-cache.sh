@@ -676,7 +676,9 @@ main() {
 
   if [[ $FROM_CATALOG -eq 1 || -n "$SRC_DIR" || ${#EXTRA_SOURCES[@]} -gt 0 || ${#SRC_URL_PAIRS[@]} -gt 0 ]]; then NEED_CONTROLLER=1; fi
   if [[ $NEED_CONTROLLER -eq 1 ]] && ! is_root; then echo "Требуются права root для режима контроллера." >&2; exit 1; fi
-  if { [[ $FROM_CATALOG -eq 1 ]] || [[ $MIRROR_ALL -eq 1 ]]; } && [[ -z "$APP_VERSION" || "$APP_VERSION" == "auto" ]]; then auto_detect_app_version; fi
+  # Для FROM_CATALOG вызываем auto_detect_app_version здесь
+  # Для MIRROR_ALL это делается внутри mirror_all() после установки каталога
+  if [[ $FROM_CATALOG -eq 1 ]] && [[ -z "$APP_VERSION" || "$APP_VERSION" == "auto" ]]; then auto_detect_app_version; fi
 
   if [[ $FROM_CATALOG -eq 1 ]]; then process_from_catalog; fi
   process_manual_sources
