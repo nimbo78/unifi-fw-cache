@@ -516,8 +516,6 @@ process_from_catalog() {
 }
 
 mirror_all() {
-  [[ -r "$CATALOG" ]] || { echo "Каталог не найден" >&2; exit 1; }
-  auto_detect_app_version
   local root="$MIRROR_ROOT"
 
   # Если нужно обновить каталог и сохранить в зеркало
@@ -529,6 +527,10 @@ mirror_all() {
     CATALOG="$mirror_catalog"
   fi
 
+  # Проверка каталога после возможного обновления
+  [[ -r "$CATALOG" ]] || { echo "Каталог не найден: $CATALOG" >&2; exit 1; }
+
+  auto_detect_app_version
   local jq_filter='.[$v].release | .[].url + "\t" + .[].md5sum'
   if [[ -n "$FILTER_REGEX" ]]; then
       echo "Зеркалирование (filter: '$FILTER_REGEX')..."
