@@ -6,6 +6,7 @@ set -euo pipefail
 # --- Конфигурация по умолчанию ---
 UNIFI_FW_DIR="${UNIFI_FW_DIR:-/var/lib/unifi/firmware}"
 CATALOG="${CATALOG:-/var/lib/unifi/firmware.json}"
+CATALOG_URL="${CATALOG_URL:-https://fw-download.ubnt.com/data/firmware.json}"
 APP_VERSION="${APP_VERSION:-}"
 DEV_FAMILY="${DEV_FAMILY:-}"
 VERSION="${VERSION:-}"
@@ -13,12 +14,17 @@ UNIFI_USER="${UNIFI_USER:-unifi}"
 UNIFI_GROUP="${UNIFI_GROUP:-unifi}"
 RESTART="${RESTART:-1}"
 REWRITE_HOST="${REWRITE_HOST:-}"
+REWRITE_CATALOG_HOST="${REWRITE_CATALOG_HOST:-}"
 MIRROR_ROOT="${MIRROR_ROOT:-.}"
 DOWNLOAD_THREADS="${DOWNLOAD_THREADS:-5}"
+MAX_CATALOG_AGE="${MAX_CATALOG_AGE:-20}"
+CATALOG_BACKUP="${CATALOG_BACKUP:-1}"
 
 SRC_DIR=""
 FROM_CATALOG=0
 MIRROR_ALL=0
+UPDATE_CATALOG=0
+AUTO_UPDATE_CATALOG=0
 CODES=()
 EXTRA_SOURCES=()
 SRC_URL_PAIRS=()
@@ -83,10 +89,16 @@ while [[ $# -gt 0 ]]; do
     --mirror-all) MIRROR_ALL=1; shift ;;
     --mirror-root) shift; MIRROR_ROOT="${1:-$MIRROR_ROOT}"; shift || true ;;
     --rewrite-host) shift; REWRITE_HOST="${1:-}"; shift || true ;;
+    --rewrite-catalog-host) shift; REWRITE_CATALOG_HOST="${1:-}"; shift || true ;;
     --dev-family) shift; DEV_FAMILY="${1:-}"; shift || true ;;
     --version) shift; VERSION="${1:-}"; shift || true ;;
     --threads) shift; DOWNLOAD_THREADS="${1:-5}"; shift || true ;;
     --no-restart) RESTART=0; shift ;;
+    --update-catalog) UPDATE_CATALOG=1; shift ;;
+    --auto-update-catalog) AUTO_UPDATE_CATALOG=1; shift ;;
+    --catalog-url) shift; CATALOG_URL="${1:-$CATALOG_URL}"; shift || true ;;
+    --max-catalog-age) shift; MAX_CATALOG_AGE="${1:-20}"; shift || true ;;
+    --no-catalog-backup) CATALOG_BACKUP=0; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
     -*) echo "Unknown: $1" >&2; usage; exit 2 ;;
@@ -120,6 +132,127 @@ install_file() {
   ensure_dir "$(dirname "$dst")"
   if [[ $NEED_CONTROLLER -eq 1 ]]; then install -o "$UNIFI_USER" -g "$UNIFI_GROUP" -m "$mode" "$src" "$dst"
   else cp "$src" "$dst" && chmod "$mode" "$dst"; fi
+}
+
+check_catalog_age() {
+  local catalog="$1"
+  local max_age="${2:-20}"
+
+  [[ ! -f "$catalog" ]] && return 1
+
+  local file_age_days=$(( ($(date +%s) - $(stat -c%Y "$catalog")) / 86400 ))
+
+  if [[ $file_age_days -gt $max_age ]]; then
+    echo "⚠️ Каталог устарел: $file_age_days дней (лимит: $max_age дней)"
+    return 1
+  fi
+
+  echo "✅ Каталог актуален: $file_age_days дней"
+  return 0
+}
+
+normalize_host() {
+  local host="$1"
+
+  # Убрать trailing slash если есть
+  host="${host%/}"
+
+  # Если уже есть протокол, вернуть как есть
+  if [[ "$host" =~ ^https?:// ]]; then
+    echo "$host"
+    return
+  fi
+
+  # Иначе добавить https://
+  echo "https://$host"
+}
+
+rewrite_catalog_hosts() {
+  local catalog="$1"
+  local new_host="$2"
+
+  # Нормализовать хост (добавить https:// если нужно)
+  new_host=$(normalize_host "$new_host")
+
+  local tmp_catalog; tmp_catalog="$(mktemp)"
+
+  echo "🔄 Переписывание хостов на: $new_host"
+
+  # Заменить хост во всех URL, сохраняя весь путь
+  jq --arg host "$new_host" '
+    walk(
+      if type == "object" and has("url") then
+        .url |= sub("^https?://[^/]+"; $host)
+      else . end
+    )
+  ' "$catalog" > "$tmp_catalog" 2>/dev/null
+
+  # Проверить валидность
+  if jq empty "$tmp_catalog" 2>/dev/null; then
+    mv "$tmp_catalog" "$catalog"
+    echo "✅ Хосты переписаны"
+    return 0
+  else
+    echo "❌ Ошибка при переписывании хостов"
+    rm -f "$tmp_catalog"
+    return 1
+  fi
+}
+
+update_catalog() {
+  local source_url="${1:-$CATALOG_URL}"
+  local target_file="${2:-$CATALOG}"
+  local rewrite_host="${3:-$REWRITE_CATALOG_HOST}"
+  local backup="${4:-$CATALOG_BACKUP}"
+
+  echo "📥 Обновление каталога из: $source_url"
+
+  # Резервная копия
+  if [[ $backup -eq 1 && -f "$target_file" ]]; then
+    local backup_file="${target_file}.bak.$(ts)"
+    cp "$target_file" "$backup_file" 2>/dev/null || true
+    echo "💾 Резервная копия: $backup_file"
+  fi
+
+  # Скачать новый каталог
+  local tmp_file; tmp_file="$(mktemp)"
+  if ! wget -q -O "$tmp_file" "$source_url" 2>/dev/null; then
+    echo "❌ Ошибка загрузки каталога, используется старый"
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  # Проверить валидность JSON
+  if ! jq empty "$tmp_file" 2>/dev/null; then
+    echo "❌ Невалидный JSON, используется старый каталог"
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  # Переписать хосты, если нужно
+  if [[ -n "$rewrite_host" ]]; then
+    if ! rewrite_catalog_hosts "$tmp_file" "$rewrite_host"; then
+      rm -f "$tmp_file"
+      return 1
+    fi
+  fi
+
+  # Заменить старый каталог
+  ensure_dir "$(dirname "$target_file")"
+  if [[ $NEED_CONTROLLER -eq 1 || $UPDATE_CATALOG -eq 1 ]]; then
+    # Для режима контроллера или явного обновления - правильные права
+    if is_root; then
+      install -o "$UNIFI_USER" -g "$UNIFI_GROUP" -m 0644 "$tmp_file" "$target_file" 2>/dev/null || cp "$tmp_file" "$target_file"
+    else
+      cp "$tmp_file" "$target_file"
+    fi
+  else
+    cp "$tmp_file" "$target_file"
+  fi
+  rm -f "$tmp_file"
+
+  echo "✅ Каталог обновлён: $target_file"
+  return 0
 }
 
 find_compatible_devices() {
@@ -317,7 +450,16 @@ mirror_all() {
   [[ -r "$CATALOG" ]] || { echo "Каталог не найден" >&2; exit 1; }
   auto_detect_app_version
   local root="$MIRROR_ROOT"
-  
+
+  # Если нужно обновить каталог и сохранить в зеркало
+  if [[ $UPDATE_CATALOG -eq 1 ]]; then
+    local mirror_catalog="$root/firmware.json"
+    echo "📦 Обновление каталога для зеркала..."
+    update_catalog "$CATALOG_URL" "$mirror_catalog" "$REWRITE_CATALOG_HOST" "$CATALOG_BACKUP"
+    # Использовать обновлённый каталог для зеркалирования
+    CATALOG="$mirror_catalog"
+  fi
+
   local jq_filter='.[$v].release | .[].url + "\t" + .[].md5sum'
   if [[ -n "$FILTER_REGEX" ]]; then
       echo "Зеркалирование (filter: '$FILTER_REGEX')..."
@@ -329,21 +471,21 @@ mirror_all() {
   jq -r --arg v "$APP_VERSION" "$jq_filter" "$CATALOG" | \
   while IFS=$'\t' read -r url md5sum; do
     [[ -z "$url" || "$url" == "null" ]] && continue
-    
+
     # FIX: Разделяем объявление переменных, чтобы избежать unbound variable в set -u
     local rel_path
     rel_path="${url#*://*/}"
-    
+
     local dst
     dst="$root/$rel_path"
-    
+
     if [[ -f "$dst" ]]; then
       local local_md5; local_md5=$(md5sum "$dst" | awk '{print $1}')
       if [[ "$local_md5" == "$md5sum" ]]; then continue; fi
     fi
     queue_download "$url" "$dst"
   done
-  
+
   process_download_queue
   echo "Зеркалирование завершено."
 }
@@ -432,6 +574,22 @@ process_manual_sources() {
 }
 
 main() {
+  # Режим обновления каталога (только обновить и выйти)
+  if [[ $UPDATE_CATALOG -eq 1 && $MIRROR_ALL -eq 0 ]]; then
+    echo "🔄 Режим обновления каталога"
+    if ! is_root; then echo "⚠️ Требуются права root для обновления системного каталога." >&2; fi
+    update_catalog "$CATALOG_URL" "$CATALOG" "$REWRITE_CATALOG_HOST" "$CATALOG_BACKUP"
+    exit $?
+  fi
+
+  # Автообновление каталога перед основной логикой
+  if [[ $AUTO_UPDATE_CATALOG -eq 1 ]]; then
+    if ! check_catalog_age "$CATALOG" "$MAX_CATALOG_AGE"; then
+      echo "🔄 Автообновление каталога..."
+      update_catalog "$CATALOG_URL" "$CATALOG" "$REWRITE_CATALOG_HOST" "$CATALOG_BACKUP" || echo "⚠️ Не удалось обновить каталог, используется старый"
+    fi
+  fi
+
   if [[ $FROM_CATALOG -eq 1 || -n "$SRC_DIR" || ${#EXTRA_SOURCES[@]} -gt 0 || ${#SRC_URL_PAIRS[@]} -gt 0 ]]; then NEED_CONTROLLER=1; fi
   if [[ $NEED_CONTROLLER -eq 1 ]] && ! is_root; then echo "Требуются права root для режима контроллера." >&2; exit 1; fi
   if { [[ $FROM_CATALOG -eq 1 ]] || [[ $MIRROR_ALL -eq 1 ]]; } && [[ -z "$APP_VERSION" || "$APP_VERSION" == "auto" ]]; then auto_detect_app_version; fi
