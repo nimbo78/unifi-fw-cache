@@ -135,7 +135,7 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
   README.md           - Основная документация
   CATALOG_UPDATE.md   - Руководство по обновлению каталога
 
-🔗 Подробнее: https://github.com/YOUR-USERNAME/unifi-fw-cache
+🔗 Подробнее: https://github.com/nimbo78/unifi-fw-cache
 EOF
 }
 
