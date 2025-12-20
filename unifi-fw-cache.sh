@@ -25,6 +25,7 @@ FROM_CATALOG=0
 MIRROR_ALL=0
 UPDATE_CATALOG=0
 AUTO_UPDATE_CATALOG=0
+FETCH_CATALOG_API=0
 CODES=()
 EXTRA_SOURCES=()
 SRC_URL_PAIRS=()
@@ -61,7 +62,9 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
 📋 Обновление каталога:
   --update-catalog            Обновить firmware.json и выйти
   --auto-update-catalog       Автообновление каталога при запуске (если устарел)
-  --catalog-url URL           URL источника каталога
+  --fetch-catalog-api         Получить каталог через API Ubiquiti вместо прямого URL
+                              (рекомендуется для --mirror-all, т.к. прямой URL недоступен)
+  --catalog-url URL           URL источника каталога (может быть недоступен: 403 Forbidden)
                               (default: https://fw-download.ubnt.com/data/firmware.json)
   --rewrite-catalog-host HOST Заменить хост в URL каталога (напр. fw-download.n78.ru)
   --max-catalog-age DAYS      Максимальный возраст каталога в днях (default: 20)
@@ -110,7 +113,12 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
   # Автообновление каталога при скачивании прошивок
   sudo ./$(basename "$0") --auto-update-catalog --from-catalog --codes "U7PG2"
 
-  # Создать зеркало с обновлённым каталогом
+  # Создать зеркало через API Ubiquiti (рекомендуется)
+  ./$(basename "$0") --fetch-catalog-api \\
+    --rewrite-catalog-host fw-download.n78.ru \\
+    --mirror-all --mirror-root /srv/unifi-mirror
+
+  # Создать зеркало с обновлённым каталогом (если есть доступный URL)
   ./$(basename "$0") --update-catalog \\
     --catalog-url https://fw-download.ubnt.com/data/firmware.json \\
     --rewrite-catalog-host fw-download.n78.ru \\
@@ -165,6 +173,7 @@ while [[ $# -gt 0 ]]; do
     --no-restart) RESTART=0; shift ;;
     --update-catalog) UPDATE_CATALOG=1; shift ;;
     --auto-update-catalog) AUTO_UPDATE_CATALOG=1; shift ;;
+    --fetch-catalog-api) FETCH_CATALOG_API=1; shift ;;
     --catalog-url) shift; CATALOG_URL="${1:-$CATALOG_URL}"; shift || true ;;
     --max-catalog-age) shift; MAX_CATALOG_AGE="${1:-20}"; shift || true ;;
     --no-catalog-backup) CATALOG_BACKUP=0; shift ;;
@@ -321,6 +330,85 @@ update_catalog() {
   rm -f "$tmp_file"
 
   echo "✅ Каталог обновлён: $target_file"
+  return 0
+}
+
+fetch_and_convert_firmware_api() {
+  local target_file="${1:-firmware.json}"
+  local rewrite_host="${2:-}"
+
+  local api_url="https://fw-update.ubnt.com/api/firmware"
+  local filters="filter=eq~~product~~unifi-firmware&filter=eq~~channel~~release&limit=5000"
+
+  echo "📡 Загрузка каталога через API Ubiquiti..."
+  echo "   Источник: $api_url?$filters"
+
+  # Скачать JSON с API
+  local tmp_api; tmp_api="$(mktemp)"
+  if ! wget -q -O "$tmp_api" "$api_url?$filters" 2>/dev/null; then
+    echo "❌ Ошибка загрузки API" >&2
+    rm -f "$tmp_api"
+    return 1
+  fi
+
+  # Проверить валидность JSON
+  if ! jq empty "$tmp_api" 2>/dev/null; then
+    echo "❌ Невалидный JSON от API" >&2
+    rm -f "$tmp_api"
+    return 1
+  fi
+
+  # Преобразовать формат API в формат firmware.json
+  local tmp_catalog; tmp_catalog="$(mktemp)"
+  echo "🔄 Преобразование формата API в firmware.json..."
+
+  # Извлечь количество устройств
+  local count; count=$(jq '._embedded.firmware | length' "$tmp_api" 2>/dev/null || echo 0)
+  echo "   Найдено устройств: $count"
+
+  # Преобразовать: создаём структуру {"mirror": {"release": {...}}}
+  jq '
+    {
+      "mirror": {
+        "release": (
+          ._embedded.firmware |
+          map({
+            (.platform): {
+              url: ._links.data.href,
+              md5sum: .md5,
+              version: .version,
+              size: .file_size
+            }
+          }) |
+          add
+        )
+      }
+    }
+  ' "$tmp_api" > "$tmp_catalog" 2>/dev/null
+
+  if ! jq empty "$tmp_catalog" 2>/dev/null; then
+    echo "❌ Ошибка преобразования формата" >&2
+    rm -f "$tmp_api" "$tmp_catalog"
+    return 1
+  fi
+
+  rm -f "$tmp_api"
+
+  # Переписать хосты, если нужно
+  if [[ -n "$rewrite_host" ]]; then
+    if ! rewrite_catalog_hosts "$tmp_catalog" "$rewrite_host"; then
+      rm -f "$tmp_catalog"
+      return 1
+    fi
+  fi
+
+  # Сохранить каталог
+  ensure_dir "$(dirname "$target_file")"
+  cp "$tmp_catalog" "$target_file"
+  rm -f "$tmp_catalog"
+
+  echo "✅ Каталог создан через API: $target_file"
+  echo "   Версия для APP_VERSION: mirror"
   return 0
 }
 
@@ -519,10 +607,16 @@ mirror_all() {
   local root="$MIRROR_ROOT"
   local mirror_catalog="$root/firmware.json"
 
-  # Если нужно обновить каталог
-  if [[ $UPDATE_CATALOG -eq 1 ]]; then
-    echo "📦 Обновление каталога для зеркала..."
-    update_catalog "$CATALOG_URL" "$mirror_catalog" "$REWRITE_CATALOG_HOST" "$CATALOG_BACKUP"
+  # Если нужно обновить/получить каталог
+  if [[ $UPDATE_CATALOG -eq 1 || $FETCH_CATALOG_API -eq 1 ]]; then
+    if [[ $FETCH_CATALOG_API -eq 1 ]]; then
+      echo "📦 Получение каталога через API Ubiquiti..."
+      fetch_and_convert_firmware_api "$mirror_catalog" "$REWRITE_CATALOG_HOST"
+      APP_VERSION="mirror"
+    else
+      echo "📦 Обновление каталога для зеркала..."
+      update_catalog "$CATALOG_URL" "$mirror_catalog" "$REWRITE_CATALOG_HOST" "$CATALOG_BACKUP"
+    fi
   fi
 
   # Для зеркала приоритетно используем каталог из целевой папки зеркала
@@ -533,13 +627,28 @@ mirror_all() {
     echo "📋 Используется системный каталог: $CATALOG"
   else
     echo "⚠️ Каталог не найден ни в зеркале ($mirror_catalog), ни в системе ($CATALOG)" >&2
-    echo "🔄 Автоматическая загрузка каталога с $CATALOG_URL..." >&2
-    if update_catalog "$CATALOG_URL" "$mirror_catalog" "$REWRITE_CATALOG_HOST" "0"; then
-      echo "✅ Каталог успешно загружен: $mirror_catalog"
-      CATALOG="$mirror_catalog"
+    if [[ $FETCH_CATALOG_API -eq 1 ]]; then
+      echo "🔄 Автоматическое получение каталога через API Ubiquiti..." >&2
+      if fetch_and_convert_firmware_api "$mirror_catalog" "$REWRITE_CATALOG_HOST"; then
+        echo "✅ Каталог успешно получен через API: $mirror_catalog"
+        CATALOG="$mirror_catalog"
+        APP_VERSION="mirror"
+      else
+        echo "❌ Не удалось получить каталог через API" >&2
+        exit 1
+      fi
     else
-      echo "❌ Не удалось загрузить каталог" >&2
-      exit 1
+      echo "🔄 Автоматическая загрузка каталога с $CATALOG_URL..." >&2
+      echo "⚠️ ВНИМАНИЕ: URL $CATALOG_URL может быть недоступен (403 Forbidden)" >&2
+      echo "💡 Подсказка: используйте --fetch-catalog-api для получения через API Ubiquiti" >&2
+      if update_catalog "$CATALOG_URL" "$mirror_catalog" "$REWRITE_CATALOG_HOST" "0"; then
+        echo "✅ Каталог успешно загружен: $mirror_catalog"
+        CATALOG="$mirror_catalog"
+      else
+        echo "❌ Не удалось загрузить каталог" >&2
+        echo "💡 Попробуйте с флагом --fetch-catalog-api" >&2
+        exit 1
+      fi
     fi
   fi
 
