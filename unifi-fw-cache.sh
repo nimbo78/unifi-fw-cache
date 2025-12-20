@@ -408,20 +408,32 @@ fetch_and_convert_firmware_api() {
 
   rm -f "$tmp_api"
 
-  # Переписать хосты, если нужно
+  # Определить путь к файлу с оригинальными ссылками
+  local target_dir; target_dir="$(dirname "$target_file")"
+  local ubnt_catalog="$target_dir/firmware.ubnt.json"
+
+  # Сохранить каталог с оригинальными ссылками Ubiquiti
+  ensure_dir "$target_dir"
+  cp "$tmp_catalog" "$ubnt_catalog"
+  echo "💾 Каталог с оригинальными ссылками: $ubnt_catalog"
+
+  # Если нужно переписать хосты - создаём отдельный файл
   if [[ -n "$rewrite_host" ]]; then
     if ! rewrite_catalog_hosts "$tmp_catalog" "$rewrite_host"; then
       rm -f "$tmp_catalog"
       return 1
     fi
+    cp "$tmp_catalog" "$target_file"
+    echo "✅ Каталог с переписанными хостами: $target_file"
+    echo "   Для скачивания используйте: $ubnt_catalog"
+  else
+    # Без переписывания - просто копируем
+    cp "$tmp_catalog" "$target_file"
+    echo "✅ Каталог создан: $target_file"
   fi
 
-  # Сохранить каталог
-  ensure_dir "$(dirname "$target_file")"
-  cp "$tmp_catalog" "$target_file"
   rm -f "$tmp_catalog"
 
-  echo "✅ Каталог создан через API: $target_file"
   echo "   Версия для APP_VERSION: mirror"
   return 0
 }
@@ -667,6 +679,17 @@ mirror_all() {
   fi
 
   auto_detect_app_version
+
+  # Определить каталог для скачивания (с оригинальными ссылками)
+  local ubnt_catalog="$root/firmware.ubnt.json"
+  local download_catalog="$CATALOG"
+  if [[ -r "$ubnt_catalog" ]]; then
+    download_catalog="$ubnt_catalog"
+    echo "⬇️ Скачивание по оригинальным ссылкам: $ubnt_catalog"
+  else
+    echo "⬇️ Скачивание по каталогу: $download_catalog"
+  fi
+
   local jq_filter='.[$v].release | to_entries[] | .value.url + "\t" + .value.md5sum'
   if [[ -n "$FILTER_REGEX" ]]; then
       echo "Зеркалирование (filter: '$FILTER_REGEX')..."
@@ -675,7 +698,7 @@ mirror_all() {
       echo "Зеркалирование (ВСЕ файлы)..."
   fi
 
-  jq -r --arg v "$APP_VERSION" "$jq_filter" "$CATALOG" | \
+  jq -r --arg v "$APP_VERSION" "$jq_filter" "$download_catalog" | \
   while IFS=$'\t' read -r url md5sum; do
     [[ -z "$url" || "$url" == "null" ]] && continue
 
