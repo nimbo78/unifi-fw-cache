@@ -654,7 +654,7 @@ mirror_all() {
   fi
 
   auto_detect_app_version
-  local jq_filter='.[$v].release | .[].url + "\t" + .[].md5sum'
+  local jq_filter='.[$v].release | to_entries[] | .value.url + "\t" + .value.md5sum'
   if [[ -n "$FILTER_REGEX" ]]; then
       echo "Зеркалирование (filter: '$FILTER_REGEX')..."
       jq_filter=".[\$v].release | to_entries[] | select(.key | test(\"$FILTER_REGEX\")) | .value.url + \"\t\" + .value.md5sum"
