@@ -6,6 +6,7 @@ set -euo pipefail
 # --- Конфигурация по умолчанию ---
 UNIFI_FW_DIR="${UNIFI_FW_DIR:-/var/lib/unifi/firmware}"
 CATALOG="${CATALOG:-/var/lib/unifi/firmware.json}"
+# ВНИМАНИЕ: Прямой URL недоступен (403 Forbidden). Используйте --fetch-catalog-api
 CATALOG_URL="${CATALOG_URL:-https://fw-download.ubnt.com/data/firmware.json}"
 APP_VERSION="${APP_VERSION:-}"
 DEV_FAMILY="${DEV_FAMILY:-}"
@@ -118,10 +119,10 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
     --rewrite-catalog-host fw-download.n78.ru \\
     --mirror-all --mirror-root /srv/unifi-mirror
 
-  # Создать зеркало с обновлённым каталогом (если есть доступный URL)
+  # Создать зеркало с кастомного зеркала (если есть свой mirror с firmware.json)
   ./$(basename "$0") --update-catalog \\
-    --catalog-url https://fw-download.ubnt.com/data/firmware.json \\
-    --rewrite-catalog-host fw-download.n78.ru \\
+    --catalog-url https://your-internal-mirror.local/firmware.json \\
+    --rewrite-catalog-host your-internal-mirror.local \\
     --mirror-all --mirror-root /srv/unifi-mirror
 
   # Добавить локальные файлы в кэш
