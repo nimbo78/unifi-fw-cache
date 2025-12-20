@@ -337,7 +337,7 @@ fetch_and_convert_firmware_api() {
   local target_file="${1:-firmware.json}"
   local rewrite_host="${2:-}"
 
-  local api_url="https://fw-update.ubnt.com/api/firmware"
+  local api_url="https://fw-update.ubnt.com/api/firmware-latest"
   local filters="filter=eq~~product~~unifi-firmware&filter=eq~~channel~~release&limit=5000"
 
   echo "📡 Загрузка каталога через API Ubiquiti..."
