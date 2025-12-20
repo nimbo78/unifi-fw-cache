@@ -46,7 +46,7 @@
 --catalog-url URL             # Источник каталога
                               # По умолчанию: https://fw-download.ubnt.com/data/firmware.json
 --rewrite-catalog-host HOST   # Новый хост для замены в URL
-                              # Например: fw-download.n78.ru
+                              # Например: fw-mirror.example.com
                               # Автоматически добавится https:// если не указан
 --max-catalog-age DAYS        # Максимальный возраст каталога (по умолчанию: 20 дней)
 --no-catalog-backup           # Не делать резервную копию при обновлении
@@ -67,7 +67,7 @@
 
 ```bash
 # Использовать каталог с вашего зеркала
-CATALOG_URL=https://fw-download.n78.ru/firmware.json \
+CATALOG_URL=https://fw-mirror.example.com/firmware.json \
   sudo ./unifi-fw-cache.sh --from-catalog --codes "UAP6MP"
 
 # Увеличить максимальный возраст каталога
@@ -141,14 +141,14 @@ flowchart TD
 ```bash
 # В cron на контроллере (каждый день в 3:00)
 0 3 * * * /opt/unifi-fw-cache.sh --update-catalog \
-  --catalog-url https://fw-download.n78.ru/firmware.json \
-  --rewrite-catalog-host fw-download.n78.ru \
+  --catalog-url https://fw-mirror.example.com/firmware.json \
+  --rewrite-catalog-host fw-mirror.example.com \
   >> /var/log/unifi-catalog.log 2>&1
 ```
 
 **Что происходит:**
 1. ✅ Скачивает свежий `firmware.json` с вашего зеркала
-2. ✅ Переписывает все URL: `https://dl.ui.com/...` → `https://fw-download.n78.ru/...`
+2. ✅ Переписывает все URL: `https://dl.ui.com/...` → `https://fw-mirror.example.com/...`
 3. ✅ Сохраняет в `/var/lib/unifi/firmware.json`
 4. ✅ Контроллер в WebUI видит новые прошивки
 
@@ -163,12 +163,12 @@ flowchart TD
 **Решение:**
 
 ```bash
-# На бастион-хосте (fw-download.n78.ru)
+# На бастион-хосте (fw-mirror.example.com)
 # Каждое воскресенье в 2:00 обновлять зеркало
 0 2 * * 0 /opt/unifi-fw-cache.sh \
   --update-catalog \
   --catalog-url https://fw-download.ubnt.com/data/firmware.json \
-  --rewrite-catalog-host fw-download.n78.ru \
+  --rewrite-catalog-host fw-mirror.example.com \
   --mirror-all \
   --mirror-root /srv/www/unifi-mirror \
   >> /var/log/unifi-mirror.log 2>&1
@@ -191,10 +191,10 @@ flowchart TD
 ```nginx
 server {
     listen 443 ssl;
-    server_name fw-download.n78.ru;
+    server_name fw-mirror.example.com;
 
-    ssl_certificate /etc/ssl/certs/fw-download.n78.ru.crt;
-    ssl_certificate_key /etc/ssl/private/fw-download.n78.ru.key;
+    ssl_certificate /etc/ssl/certs/fw-mirror.example.com.crt;
+    ssl_certificate_key /etc/ssl/private/fw-mirror.example.com.key;
 
     root /srv/www/unifi-mirror;
 
@@ -218,7 +218,7 @@ sudo ./unifi-fw-cache.sh \
   --from-catalog \
   --auto-update-catalog \
   --max-catalog-age 20 \
-  --catalog-url https://fw-download.n78.ru/firmware.json \
+  --catalog-url https://fw-mirror.example.com/firmware.json \
   --codes "UAP6MP U7PG2"
 ```
 
@@ -263,11 +263,11 @@ sudo ./unifi-fw-cache.sh --update-catalog
 
 # С переписыванием хостов
 sudo ./unifi-fw-cache.sh --update-catalog \
-  --rewrite-catalog-host fw-download.n78.ru
+  --rewrite-catalog-host fw-mirror.example.com
 
 # С пользовательским источником
 sudo ./unifi-fw-cache.sh --update-catalog \
-  --catalog-url https://fw-download.n78.ru/firmware.json
+  --catalog-url https://fw-mirror.example.com/firmware.json
 
 # Без резервной копии
 sudo ./unifi-fw-cache.sh --update-catalog --no-catalog-backup
@@ -299,14 +299,14 @@ sudo ./unifi-fw-cache.sh \
 # Зеркало с обновлённым каталогом
 ./unifi-fw-cache.sh \
   --update-catalog \
-  --rewrite-catalog-host fw-download.n78.ru \
+  --rewrite-catalog-host fw-mirror.example.com \
   --mirror-all \
   --mirror-root /srv/mirror
 
 # Зеркало только для AP (фильтр)
 ./unifi-fw-cache.sh \
   --update-catalog \
-  --rewrite-catalog-host fw-download.n78.ru \
+  --rewrite-catalog-host fw-mirror.example.com \
   --mirror-all \
   --mirror-root /srv/mirror \
   --filter "^(UAP|U7)"
@@ -347,7 +347,7 @@ sudo ./unifi-fw-cache.sh \
 **Стало:**
 ```json
 {
-  "url": "https://fw-download.n78.ru/unifi/firmware/U7PG2/6.7.35.15586/file.bin"
+  "url": "https://fw-mirror.example.com/unifi/firmware/U7PG2/6.7.35.15586/file.bin"
 }
 ```
 
@@ -359,11 +359,11 @@ sudo ./unifi-fw-cache.sh \
 
 ```bash
 # Автоматически добавит https://
---rewrite-catalog-host fw-download.n78.ru
+--rewrite-catalog-host fw-mirror.example.com
 
 # Или явно укажите протокол
---rewrite-catalog-host http://fw-download.n78.ru
---rewrite-catalog-host https://fw-download.n78.ru
+--rewrite-catalog-host http://fw-mirror.example.com
+--rewrite-catalog-host https://fw-mirror.example.com
 ```
 
 ### Q: Как проверить возраст каталога?
@@ -396,10 +396,10 @@ sudo ./unifi-fw-cache.sh --update-catalog
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name fw-download.n78.ru;
+    server_name fw-mirror.example.com;
 
-    ssl_certificate /etc/ssl/certs/fw-download.n78.ru.crt;
-    ssl_certificate_key /etc/ssl/private/fw-download.n78.ru.key;
+    ssl_certificate /etc/ssl/certs/fw-mirror.example.com.crt;
+    ssl_certificate_key /etc/ssl/private/fw-mirror.example.com.key;
 
     root /srv/www/unifi-mirror;
 
@@ -414,8 +414,8 @@ server {
     }
 
     # Логирование
-    access_log /var/log/nginx/fw-download.n78.ru.access.log;
-    error_log /var/log/nginx/fw-download.n78.ru.error.log;
+    access_log /var/log/nginx/fw-mirror.example.com.access.log;
+    error_log /var/log/nginx/fw-mirror.example.com.error.log;
 }
 ```
 
@@ -425,10 +425,10 @@ server {
 
 ```bash
 # /etc/cron.d/unifi-fw-cache
-CATALOG_URL=https://fw-download.n78.ru/firmware.json
+CATALOG_URL=https://fw-mirror.example.com/firmware.json
 MAX_CATALOG_AGE=20
 
-0 3 * * * root /opt/unifi-fw-cache.sh --update-catalog --rewrite-catalog-host fw-download.n78.ru
+0 3 * * * root /opt/unifi-fw-cache.sh --update-catalog --rewrite-catalog-host fw-mirror.example.com
 ```
 
 ---

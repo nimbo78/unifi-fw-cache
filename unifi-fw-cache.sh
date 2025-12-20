@@ -67,7 +67,7 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
                               (рекомендуется для --mirror-all, т.к. прямой URL недоступен)
   --catalog-url URL           URL источника каталога (может быть недоступен: 403 Forbidden)
                               (default: https://fw-download.ubnt.com/data/firmware.json)
-  --rewrite-catalog-host HOST Заменить хост в URL каталога (напр. fw-download.n78.ru)
+  --rewrite-catalog-host HOST Заменить хост в URL каталога (напр. fw-mirror.example.com)
   --max-catalog-age DAYS      Максимальный возраст каталога в днях (default: 20)
   --no-catalog-backup         Не создавать резервную копию при обновлении
 
@@ -108,15 +108,15 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
 
   # Обновить firmware.json с переписыванием хостов
   sudo ./$(basename "$0") --update-catalog \\
-    --catalog-url https://fw-download.n78.ru/firmware.json \\
-    --rewrite-catalog-host fw-download.n78.ru
+    --catalog-url https://fw-mirror.example.com/firmware.json \\
+    --rewrite-catalog-host fw-mirror.example.com
 
   # Автообновление каталога при скачивании прошивок
   sudo ./$(basename "$0") --auto-update-catalog --from-catalog --codes "U7PG2"
 
   # Создать зеркало через API Ubiquiti (рекомендуется)
   ./$(basename "$0") --fetch-catalog-api \\
-    --rewrite-catalog-host fw-download.n78.ru \\
+    --rewrite-catalog-host fw-mirror.example.com \\
     --mirror-all --mirror-root /srv/unifi-mirror
 
   # Создать зеркало с кастомного зеркала (если есть свой mirror с firmware.json)
@@ -135,7 +135,7 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
   README.md           - Основная документация
   CATALOG_UPDATE.md   - Руководство по обновлению каталога
 
-🔗 Подробнее: https://github.com/nimbo78/unifi-fw-cache
+🔗 Подробнее: https://github.com/YOUR-USERNAME/unifi-fw-cache
 EOF
 }
 
