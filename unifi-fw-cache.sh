@@ -266,13 +266,26 @@ rewrite_catalog_hosts() {
     )
   ' "$catalog" > "$tmp_catalog" 2>/dev/null
 
-  # Проверить валидность
+  # Проверить валидность и размер
+  if [[ ! -s "$tmp_catalog" ]]; then
+    echo "⚠️ walk() не сработала, используем альтернативный метод..." >&2
+    # Альтернативный метод: используем sed для простой замены хоста
+    local old_host_pattern="https://fw-download\.ubnt\.com"
+    sed "s|$old_host_pattern|$new_host|g" "$catalog" > "$tmp_catalog"
+
+    if [[ ! -s "$tmp_catalog" ]] || ! jq empty "$tmp_catalog" 2>/dev/null; then
+      echo "❌ Ошибка при переписывании хостов" >&2
+      rm -f "$tmp_catalog"
+      return 1
+    fi
+  fi
+
   if jq empty "$tmp_catalog" 2>/dev/null; then
     mv "$tmp_catalog" "$catalog"
     echo "✅ Хосты переписаны"
     return 0
   else
-    echo "❌ Ошибка при переписывании хостов"
+    echo "❌ Ошибка при переписывании хостов: невалидный JSON" >&2
     rm -f "$tmp_catalog"
     return 1
   fi
