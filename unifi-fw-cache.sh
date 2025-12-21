@@ -214,7 +214,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 while [[ $# -gt 0 ]]; do
-  if [[ "$1" =~ ^https?:// ]]; then EXTRA_SOURCES+=("$1"); else EXTRA_SOURCES+=("$1"); fi
+  EXTRA_SOURCES+=("$1")
   shift
 done
 
@@ -294,6 +294,8 @@ rewrite_catalog_hosts() {
   new_host=$(normalize_host "$new_host")
 
   local tmp_catalog; tmp_catalog="$(mktemp)"
+  # Очистка временного файла при выходе из функции
+  trap 'rm -f "$tmp_catalog" 2>/dev/null' RETURN
 
   echo "🔄 Переписывание хостов на: $new_host"
 
@@ -309,13 +311,12 @@ rewrite_catalog_hosts() {
   # Проверить валидность и размер
   if [[ ! -s "$tmp_catalog" ]]; then
     echo "⚠️ walk() не сработала, используем альтернативный метод..." >&2
-    # Альтернативный метод: используем sed для простой замены хоста
-    local old_host_pattern="https://fw-download\.ubnt\.com"
-    sed "s|$old_host_pattern|$new_host|g" "$catalog" > "$tmp_catalog"
+    # Альтернативный метод: используем sed для замены любого хоста в URL
+    # Паттерн: https://любой-хост/ -> $new_host/
+    sed -E 's|"url"[[:space:]]*:[[:space:]]*"https?://[^/]+/|"url": "'"$new_host"'/|g' "$catalog" > "$tmp_catalog"
 
     if [[ ! -s "$tmp_catalog" ]] || ! jq empty "$tmp_catalog" 2>/dev/null; then
       echo "❌ Ошибка при переписывании хостов" >&2
-      rm -f "$tmp_catalog"
       return 1
     fi
   fi
@@ -326,8 +327,7 @@ rewrite_catalog_hosts() {
     return 0
   else
     echo "❌ Ошибка при переписывании хостов: невалидный JSON" >&2
-    rm -f "$tmp_catalog"
-    return 1
+    return 1  # trap RETURN удалит tmp_catalog
   fi
 }
 
@@ -618,8 +618,7 @@ download_worker() {
     mv -f "$tmp_dst" "$dst"
   else
     echo "FAIL: $url" >&2
-    rm -f "$tmp_dst"
-    exit 1
+    exit 1  # trap EXIT удалит tmp_dst
   fi
 }
 export -f download_worker
