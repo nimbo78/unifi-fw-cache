@@ -20,6 +20,7 @@ MIRROR_ROOT="${MIRROR_ROOT:-.}"
 DOWNLOAD_THREADS="${DOWNLOAD_THREADS:-5}"
 MAX_CATALOG_AGE="${MAX_CATALOG_AGE:-20}"
 CATALOG_BACKUP="${CATALOG_BACKUP:-1}"
+MAX_BACKUPS="${MAX_BACKUPS:-5}"
 
 SRC_DIR=""
 FROM_CATALOG=0
@@ -32,7 +33,12 @@ EXTRA_SOURCES=()
 SRC_URL_PAIRS=()
 LAST_FILE_INDEX=-1
 NEED_CONTROLLER=0
-FILTER_REGEX="" 
+FILTER_REGEX=""
+
+# Кэш каталога для find_compatible_devices
+CATALOG_CACHE=""
+CATALOG_CACHE_FILE=""
+CATALOG_CACHE_VERSION=""
 
 # Временные файлы
 TEMP_META_FILE="$(mktemp)"
@@ -43,6 +49,26 @@ trap cleanup EXIT
 
 # --- Утилиты ---
 ts() { date +%Y%m%d-%H%M%S; }
+
+# Ротация бэкапов: оставляем только последние N файлов
+rotate_backups() {
+  local base_file="$1"
+  local max_keep="${2:-$MAX_BACKUPS}"
+  local pattern="${base_file}.bak.*"
+
+  # Получаем список бэкапов, сортируем по времени (новые первые), удаляем старые
+  local backups
+  backups=$(ls -1t $pattern 2>/dev/null || true)
+
+  local count=0
+  while IFS= read -r backup; do
+    [[ -z "$backup" ]] && continue
+    count=$((count + 1))
+    if [[ $count -gt $max_keep ]]; then
+      rm -f "$backup"
+    fi
+  done <<< "$backups"
+}
 
 usage() {
   cat <<EOF
@@ -196,6 +222,20 @@ for cmd in jq wget md5sum stat install xargs; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "Требуется: $cmd" >&2; exit 1; }
 done
 
+# Валидация числовых параметров
+if ! [[ "$DOWNLOAD_THREADS" =~ ^[0-9]+$ ]] || [[ "$DOWNLOAD_THREADS" -lt 1 ]]; then
+  echo "Ошибка: --threads должен быть положительным числом (получено: '$DOWNLOAD_THREADS')" >&2
+  exit 2
+fi
+if ! [[ "$MAX_CATALOG_AGE" =~ ^[0-9]+$ ]]; then
+  echo "Ошибка: --max-catalog-age должен быть числом (получено: '$MAX_CATALOG_AGE')" >&2
+  exit 2
+fi
+if ! [[ "$MAX_BACKUPS" =~ ^[0-9]+$ ]] || [[ "$MAX_BACKUPS" -lt 1 ]]; then
+  echo "Ошибка: MAX_BACKUPS должен быть положительным числом (получено: '$MAX_BACKUPS')" >&2
+  exit 2
+fi
+
 # --- Функции ---
 
 rewrite_url() { [[ -n "$REWRITE_HOST" ]] && echo "$1" | sed -E "s#^(https?://)[^/]+#\1$REWRITE_HOST#" || echo "$1"; }
@@ -304,6 +344,7 @@ update_catalog() {
     local backup_file="${target_file}.bak.$(ts)"
     cp "$target_file" "$backup_file" 2>/dev/null || true
     echo "💾 Резервная копия: $backup_file"
+    rotate_backups "$target_file"
   fi
 
   # Скачать новый каталог
@@ -438,6 +479,28 @@ fetch_and_convert_firmware_api() {
   return 0
 }
 
+# Загрузка кэша каталога (вызывается один раз)
+load_catalog_cache() {
+  local catalog="$1"
+  local app_version="$2"
+
+  # Проверяем, нужно ли обновить кэш
+  if [[ "$CATALOG_CACHE_FILE" == "$catalog" && "$CATALOG_CACHE_VERSION" == "$app_version" && -n "$CATALOG_CACHE" ]]; then
+    return 0
+  fi
+
+  [[ ! -f "$catalog" ]] && return 1
+
+  # Извлекаем все записи один раз: key|md5sum|version|url
+  CATALOG_CACHE=$(jq -r --arg v "$app_version" '
+    .[$v].release | to_entries[] |
+    "\(.key)|\(.value.md5sum // "")|\(.value.version // "")|\(.value.url // "")"
+  ' "$catalog" 2>/dev/null || true)
+
+  CATALOG_CACHE_FILE="$catalog"
+  CATALOG_CACHE_VERSION="$app_version"
+}
+
 find_compatible_devices() {
   local url="$1" md5="${2:-}" ver="${3:-}"
   local catalog="${CATALOG:-/var/lib/unifi/firmware.json}"
@@ -452,37 +515,40 @@ find_compatible_devices() {
   fi
   [[ -z "$app_version" ]] && return 0
 
+  # Загружаем кэш каталога (один раз для файла+версии)
+  load_catalog_cache "$catalog" "$app_version"
+  [[ -z "$CATALOG_CACHE" ]] && return 0
+
   local devices=""
+  local filename=""
+  [[ -n "$url" ]] && filename="$(basename "$url")"
 
   # Приоритет 1: Поиск по MD5 (самый надёжный)
   if [[ -n "$md5" ]]; then
-    devices=$(jq -r --arg v "$app_version" --arg md5 "$md5" '
-      .[$v].release | to_entries[] | select(.value.md5sum == $md5) | .key
-    ' "$catalog" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
+    while IFS='|' read -r dev_key dev_md5 dev_ver dev_url; do
+      [[ -z "$dev_key" ]] && continue
+      [[ "$dev_md5" == "$md5" ]] && devices+="$dev_key "
+    done <<< "$CATALOG_CACHE"
   fi
 
-  # Приоритет 2: Поиск по имени файла и версии
-  if [[ -z "$devices" && -n "$url" && -n "$ver" ]]; then
-    local filename; filename="$(basename "$url")"
-    devices=$(jq -r --arg v "$app_version" --arg fname "$filename" --arg fver "$ver" '
-      .[$v].release | to_entries[] |
-      select(.value.url | endswith($fname)) |
-      select(.value.version == $fver) |
-      .key
-    ' "$catalog" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
+  # Приоритет 2: Поиск по имени файла и версии (если MD5 ничего не нашёл)
+  if [[ -z "$devices" && -n "$filename" && -n "$ver" ]]; then
+    while IFS='|' read -r dev_key dev_md5 dev_ver dev_url; do
+      [[ -z "$dev_key" ]] && continue
+      [[ "$dev_url" == *"$filename" && "$dev_ver" == "$ver" ]] && devices+="$dev_key "
+    done <<< "$CATALOG_CACHE"
   fi
 
-  # Приоритет 3: Поиск только по имени файла
-  if [[ -z "$devices" && -n "$url" ]]; then
-    local filename; filename="$(basename "$url")"
-    devices=$(jq -r --arg v "$app_version" --arg fname "$filename" '
-      .[$v].release | to_entries[] |
-      select(.value.url | endswith($fname)) |
-      .key
-    ' "$catalog" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
+  # Приоритет 3: Поиск только по имени файла (если ничего не найдено)
+  if [[ -z "$devices" && -n "$filename" ]]; then
+    while IFS='|' read -r dev_key dev_md5 dev_ver dev_url; do
+      [[ -z "$dev_key" ]] && continue
+      [[ "$dev_url" == *"$filename" ]] && devices+="$dev_key "
+    done <<< "$CATALOG_CACHE"
   fi
 
-  echo "$devices"
+  # Убираем дубликаты и trailing space
+  echo "$devices" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//'
 }
 
 add_meta_buffer() {
@@ -515,6 +581,7 @@ commit_meta() {
   local META="$UNIFI_FW_DIR/firmware_meta.json"
   [[ ! -f "$META" ]] && echo '{"cached_firmwares":[]}' > "$META"
   install_file "$META" "${META}.bak.$(ts)" 0644
+  rotate_backups "$META"
   echo "Обновление firmware_meta.json..."
   local tmp_json; tmp_json="$(mktemp)"
   jq -s '.[0] as $current | .[1] as $new | ($current.cached_firmwares + $new) | group_by(.path) | map(last) | {cached_firmwares: .}' \
@@ -539,13 +606,17 @@ download_worker() {
   local url="${line%%$'\t'*}"
   local dst="${line#*$'\t'}"
   [[ -z "$url" || -z "$dst" ]] && return 0
-  
-  local tmp_dst="${dst}.tmp"
+
+  local tmp_dst="${dst}.tmp.$$"
+
+  # Очистка tmp файла при прерывании
+  trap 'rm -f "$tmp_dst"' EXIT INT TERM
+
   mkdir -p "$(dirname "$dst")"
   echo "Download: .../$(basename "$dst")"
-  if wget -q -c -O "$tmp_dst" --tries=3 --timeout=30 "$url"; then 
+  if wget -q -O "$tmp_dst" --tries=3 --timeout=30 "$url"; then
     mv -f "$tmp_dst" "$dst"
-  else 
+  else
     echo "FAIL: $url" >&2
     rm -f "$tmp_dst"
     exit 1
@@ -561,10 +632,19 @@ infer_family_version() {
     [[ "$url_path" =~ firmware/([^/]+)/([^/]+)/ ]] && { family="${BASH_REMATCH[1]}"; ver="${BASH_REMATCH[2]}"; }
   fi
   if [[ -z "$family" ]]; then
-    [[ "$fname_base" =~ -UAP6MP- ]] && family="UAP6MP"
-    [[ -z "$family" && "$fname_base" =~ -UAPL6- ]] && family="UAPL6"
-    [[ -z "$family" && "$fname_base" =~ -UAL6-  ]] && family="UAL6"
-    [[ -z "$family" && "$fname_base" =~ -U7PG2- ]] && family="U7PG2"
+    # Access Points (UAP)
+    [[ "$fname_base" =~ [-_](UAP6MP|UAP6LR|UAP6PRO|UAP6MESH|UAP6IW)[-_] ]] && family="${BASH_REMATCH[1]}"
+    [[ -z "$family" && "$fname_base" =~ [-_](UAPL6|UAL6|U6LR|U6PRO|U6MESH|U6IW|U6LITE)[-_] ]] && family="${BASH_REMATCH[1]}"
+    [[ -z "$family" && "$fname_base" =~ [-_](U7PG2|U7MSH|U7LR|U7PRO|U7HD|U7NHD|U7LT)[-_] ]] && family="${BASH_REMATCH[1]}"
+    # Switches (USW)
+    [[ -z "$family" && "$fname_base" =~ [-_](USW|USWPRO|USW24|USW48|USWFLEX|USWMINI)[-_] ]] && family="${BASH_REMATCH[1]}"
+    [[ -z "$family" && "$fname_base" =~ [-_](US8|US16|US24|US48|USXG)[-_] ]] && family="${BASH_REMATCH[1]}"
+    # Gateways (UGW/UDM)
+    [[ -z "$family" && "$fname_base" =~ [-_](UGW3|UGW4|UGWXG|UDM|UDMPRO|UDMSE|UDR|UXG)[-_] ]] && family="${BASH_REMATCH[1]}"
+    # Other devices
+    [[ -z "$family" && "$fname_base" =~ [-_](UCK|UCKP|UCKGEN2|UNVR|UNVRPRO)[-_] ]] && family="${BASH_REMATCH[1]}"
+    # Fallback: попытка извлечь код устройства из начала имени файла
+    [[ -z "$family" && "$fname_base" =~ ^([A-Z][A-Z0-9]+)\. ]] && family="${BASH_REMATCH[1]}"
   fi
   [[ -z "$ver" && "$fname_base" =~ ([0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?) ]] && ver="${BASH_REMATCH[1]}"
   echo "${DEV_FAMILY:-$family}|${VERSION:-$ver}"
@@ -612,7 +692,6 @@ process_from_catalog() {
     if [[ -f "$target_file" ]]; then
       if [[ "$(md5sum "$target_file" | awk '{print $1}')" == "$md5sum" ]]; then
         need_download=0
-        add_meta_buffer "$rel_path" "$ver" "$code" "$target_file"
       fi
     fi
     [[ $need_download -eq 1 ]] && queue_download "$url" "$target_file"
@@ -620,6 +699,7 @@ process_from_catalog() {
 
   process_download_queue
 
+  # Добавляем метаданные для всех файлов (существовавших + скачанных)
   while IFS=$'\t' read -r code ver url md5sum; do
     local fname target_file rel_path
     fname="$(basename "$url")"; target_file="$UNIFI_FW_DIR/$code/$ver/$fname"; rel_path="$code/$ver/$fname"
@@ -637,7 +717,10 @@ mirror_all() {
   if [[ $UPDATE_CATALOG -eq 1 || $FETCH_CATALOG_API -eq 1 ]]; then
     if [[ $FETCH_CATALOG_API -eq 1 ]]; then
       echo "📦 Получение каталога через API Ubiquiti..."
-      fetch_and_convert_firmware_api "$mirror_catalog" "$REWRITE_CATALOG_HOST"
+      if ! fetch_and_convert_firmware_api "$mirror_catalog" "$REWRITE_CATALOG_HOST"; then
+        echo "❌ Не удалось получить каталог через API" >&2
+        exit 1
+      fi
       APP_VERSION="mirror"
     else
       echo "📦 Обновление каталога для зеркала..."
@@ -744,7 +827,7 @@ process_manual_sources() {
   # Сбор информации о скачиваемых URL для последующего добавления метаданных
   local -a downloaded_urls=()
 
-  for s in "${EXTRA_SOURCES[@]}"; do
+  for s in "${EXTRA_SOURCES[@]+"${EXTRA_SOURCES[@]}"}"; do
      local code ver; IFS='|' read -r code ver < <(infer_family_version "$s")
      if [[ "$s" =~ ^https?:// ]]; then
        if [[ -n "$code" && -n "$ver" ]]; then
@@ -767,7 +850,7 @@ process_manual_sources() {
        }
      fi
   done
-  for pair in "${SRC_URL_PAIRS[@]}"; do
+  for pair in "${SRC_URL_PAIRS[@]+"${SRC_URL_PAIRS[@]}"}"; do
     local url="${pair%%|*}" file="${pair#*|}" code ver
     IFS='|' read -r code ver < <(infer_family_version "$url")
     if [[ -n "$code" && -n "$ver" && -f "$file" ]]; then
@@ -787,7 +870,7 @@ process_manual_sources() {
   process_download_queue
 
   # Добавление метаданных для скачанных файлов
-  for entry in "${downloaded_urls[@]}"; do
+  for entry in "${downloaded_urls[@]+"${downloaded_urls[@]}"}"; do
     IFS='|' read -r code ver dst url <<< "$entry"
     if [[ -f "$dst" ]]; then
       local rel_path="$code/$ver/$(basename "$dst")"
