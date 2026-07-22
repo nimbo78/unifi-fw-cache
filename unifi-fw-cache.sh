@@ -332,8 +332,6 @@ rewrite_catalog_hosts() {
   new_host=$(normalize_host "$new_host")
 
   local tmp_catalog; tmp_catalog="$(mktemp)"
-  # Очистка временного файла при выходе из функции
-  trap 'rm -f "$tmp_catalog" 2>/dev/null' RETURN
 
   echo "🔄 Переписывание хостов на: $new_host"
 
@@ -355,6 +353,7 @@ rewrite_catalog_hosts() {
 
     if [[ ! -s "$tmp_catalog" ]] || ! jq empty "$tmp_catalog" 2>/dev/null; then
       echo "❌ Ошибка при переписывании хостов" >&2
+      rm -f "$tmp_catalog"
       return 1
     fi
   fi
@@ -365,7 +364,8 @@ rewrite_catalog_hosts() {
     return 0
   else
     echo "❌ Ошибка при переписывании хостов: невалидный JSON" >&2
-    return 1  # trap RETURN удалит tmp_catalog
+    rm -f "$tmp_catalog"
+    return 1
   fi
 }
 
