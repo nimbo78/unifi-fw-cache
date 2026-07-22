@@ -758,8 +758,7 @@ controller_login() {
 
   local body headers
   body="$(mktemp)"; headers="$(mktemp)"
-  # Темпфайлы удаляются при любом выходе из функции
-  trap 'rm -f "$body" "$headers" 2>/dev/null' RETURN
+  # Темпфайлы удаляются явно перед каждым return
 
   # 1) self-hosted: успех = HTTP 200 И meta.rc == "ok" (не доверять голому 200)
   local code_self code_uos
@@ -769,6 +768,7 @@ controller_login() {
   if [[ "$code_self" == "200" ]] && jq -e '.meta.rc == "ok"' "$body" >/dev/null 2>&1; then
     API_BASE="$UNIFI_API_URL"
     echo "🔐 Вход выполнен (self-hosted API): $UNIFI_API_URL" >&2
+    rm -f "$body" "$headers"
     return 0
   fi
   if [[ "$code_self" == "400" ]]; then
@@ -777,6 +777,7 @@ controller_login() {
     else
       echo "❌ Контроллер отверг учётные данные (HTTP 400): проверьте логин/пароль" >&2
     fi
+    rm -f "$body" "$headers"
     return 1
   fi
 
@@ -788,14 +789,17 @@ controller_login() {
   if [[ "$code_uos" == "200" ]]; then
     API_BASE="$UNIFI_API_URL/proxy/network"
     echo "🔐 Вход выполнен (UniFi OS API): $UNIFI_API_URL" >&2
+    rm -f "$body" "$headers"
     return 0
   fi
   if [[ "$code_uos" == "499" ]]; then
     echo "❌ У аккаунта включена 2FA (HTTP 499) — создайте локального администратора без 2FA" >&2
+    rm -f "$body" "$headers"
     return 1
   fi
 
   echo "❌ Не удалось войти в API ($UNIFI_API_URL): self-hosted HTTP $code_self, UniFi OS HTTP $code_uos" >&2
+  rm -f "$body" "$headers"
   return 1
 }
 
