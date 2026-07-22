@@ -35,6 +35,19 @@ LAST_FILE_INDEX=-1
 NEED_CONTROLLER=0
 FILTER_REGEX=""
 
+# Интеграция с API контроллера (--codes-from-controller)
+CODES_FROM_CONTROLLER=0
+LIST_CONTROLLER_CODES=0
+CODES_FROM_DB=0
+API_CREDS_FILE=""
+UNIFI_API_URL="${UNIFI_API_URL:-}"    # default https://localhost:8443 подставляется в load_api_creds
+UNIFI_API_USER="${UNIFI_API_USER:-}"
+UNIFI_API_PASS="${UNIFI_API_PASS:-}"
+API_COOKIE_JAR=""
+API_CSRF_TOKEN=""
+API_BASE=""
+API_CURL_ARGS=()
+
 # Кэш каталога для find_compatible_devices
 CATALOG_CACHE=""
 CATALOG_CACHE_FILE=""
@@ -44,7 +57,7 @@ CATALOG_CACHE_VERSION=""
 TEMP_META_FILE="$(mktemp)"
 DOWNLOAD_LIST="$(mktemp)"
 
-cleanup() { rm -f "$TEMP_META_FILE" "$DOWNLOAD_LIST"; }
+cleanup() { rm -f "$TEMP_META_FILE" "$DOWNLOAD_LIST" ${API_COOKIE_JAR:+"$API_COOKIE_JAR"}; }
 trap cleanup EXIT
 
 # --- Утилиты ---
@@ -97,6 +110,21 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
   --max-catalog-age DAYS      Максимальный возраст каталога в днях (default: 20)
   --no-catalog-backup         Не создавать резервную копию при обновлении
 
+🔌 Интеграция с контроллером (коды adopted-устройств, multi-site):
+  --codes-from-controller     Получить коды adopted-устройств через API и кэшировать
+                              прошивки для них (включает --from-catalog; коды
+                              объединяются с --codes; --filter применяется)
+  --list-controller-codes     Только показать найденные коды и выйти (без root).
+                              stdout — итоговый список, разбивка по сайтам — stderr
+  --api-url URL               Адрес контроллера (default: https://localhost:8443)
+  --api-user USER             Логин локального администратора (2FA не поддерживается —
+                              создайте локального админа без 2FA)
+  --api-pass PASS             Пароль (видно в ps; лучше env или файл кредов)
+  --api-creds-file PATH       Файл KEY=VALUE с UNIFI_API_URL/USER/PASS (chmod 600)
+  --codes-from-db             Альтернатива без учётки: локальный MongoDB контроллера
+                              (localhost:27117, нужен mongosh/mongo); API-креды
+                              при этом игнорируются
+
 🔧 Дополнительные опции:
   --src-dir PATH              Директория с локальными файлами прошивок
   --src-url URL [FILE]        Сопоставить URL с локальным файлом
@@ -120,6 +148,9 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
   DOWNLOAD_THREADS            Количество потоков (default: 5)
   MAX_CATALOG_AGE             Максимальный возраст каталога в днях (default: 20)
   CATALOG_BACKUP              Делать резервные копии (1/0, default: 1)
+  UNIFI_API_URL               Адрес контроллера для --codes-from-controller
+  UNIFI_API_USER              Логин администратора API
+  UNIFI_API_PASS              Пароль администратора API
 
 💡 Примеры использования:
 
@@ -201,6 +232,13 @@ while [[ $# -gt 0 ]]; do
     --update-catalog) UPDATE_CATALOG=1; shift ;;
     --auto-update-catalog) AUTO_UPDATE_CATALOG=1; shift ;;
     --fetch-catalog-api) FETCH_CATALOG_API=1; shift ;;
+    --codes-from-controller) CODES_FROM_CONTROLLER=1; shift ;;
+    --list-controller-codes) LIST_CONTROLLER_CODES=1; shift ;;
+    --codes-from-db) CODES_FROM_DB=1; CODES_FROM_CONTROLLER=1; shift ;;
+    --api-url) shift; UNIFI_API_URL="${1:-}"; shift || true ;;
+    --api-user) shift; UNIFI_API_USER="${1:-}"; shift || true ;;
+    --api-pass) shift; UNIFI_API_PASS="${1:-}"; shift || true ;;
+    --api-creds-file) shift; API_CREDS_FILE="${1:-}"; shift || true ;;
     --catalog-url) shift; CATALOG_URL="${1:-$CATALOG_URL}"; shift || true ;;
     --max-catalog-age) shift; MAX_CATALOG_AGE="${1:-20}"; shift || true ;;
     --no-catalog-backup) CATALOG_BACKUP=0; shift ;;
