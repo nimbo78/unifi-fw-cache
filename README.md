@@ -41,6 +41,7 @@
 - 🔄 Обновление `firmware_meta.json` для интеграции с UniFi
 - 🔗 **Поддержка прямых URL** для скачивания прошивок
 - 🎯 **Автоматическое определение совместимых устройств** из каталога
+- 🔌 **Коды устройств прямо с контроллера**: `--codes-from-controller` берёт модели только adopted-устройств по всем сайтам (multi-site) через API (self-hosted и UniFi OS)
 - 👤 Управление правами доступа (unifi:unifi)
 - ♻️ Автоматический перезапуск службы
 
@@ -298,6 +299,30 @@ sudo ./unifi-fw-cache.sh \
   --from-catalog --codes "UAP6MP" \
   --src-dir ./additional-firmware/ \
   https://dl.ui.com/unifi/firmware/U7PG2/special.bin
+```
+
+### 🔌 Кэширование по данным контроллера (multi-site)
+
+```bash
+# Посмотреть, какие коды adopted-устройств видит контроллер (read-only, root не нужен)
+./unifi-fw-cache.sh --list-controller-codes --api-creds-file /etc/unifi-fw-cache.creds
+
+# Скачать прошивки для всех adopted-устройств (работает и через прокси: sudo -E)
+sudo -E ./unifi-fw-cache.sh --auto-update-catalog --codes-from-controller \
+  --api-creds-file /etc/unifi-fw-cache.creds
+
+# Только точки доступа со всех сайтов
+sudo -E ./unifi-fw-cache.sh --codes-from-controller --filter '^U' \
+  --api-creds-file /etc/unifi-fw-cache.creds
+
+# Файл кредов (chmod 600):
+#   UNIFI_API_URL=https://localhost:8443
+#   UNIFI_API_USER=admin
+#   UNIFI_API_PASS=secret
+# Важно: у администратора не должна быть включена 2FA (создайте локального админа)
+
+# Вариант без учётки — напрямую из локального MongoDB контроллера
+sudo ./unifi-fw-cache.sh --codes-from-db
 ```
 
 ## 🌐 Работа с прокси

@@ -899,6 +899,14 @@ process_from_catalog() {
   
   echo "Найдено устройств для кэша: ${#target_codes[@]}"
 
+  # Предупредить о кодах, которых нет в каталоге прошивок
+  local catalog_keys missing=() c
+  catalog_keys=$(jq -r --arg v "$APP_VERSION" '.[$v].release | keys[]' "$CATALOG" 2>/dev/null || true)
+  for c in "${target_codes[@]}"; do
+    grep -Fqx "$c" <<< "$catalog_keys" || missing+=("$c")
+  done
+  [[ ${#missing[@]} -gt 0 ]] && echo "⚠️ Нет в каталоге прошивок (пропускаются): ${missing[*]}" >&2
+
   local json_codes; json_codes=$(printf '%s\n' "${target_codes[@]}" | jq -R . | jq -s .)
   local tasks; tasks=$(jq -r --arg v "$APP_VERSION" --argjson target_codes "$json_codes" '
     .[$v].release | to_entries[] | select(.key as $k | $target_codes | index($k)) 
@@ -1107,6 +1115,47 @@ process_manual_sources() {
 }
 
 main() {
+  # Получение кодов adopted-устройств с контроллера
+  if [[ $CODES_FROM_CONTROLLER -eq 1 || $LIST_CONTROLLER_CODES -eq 1 ]]; then
+    # Несовместимые комбинации — до обращения к API
+    if [[ $UPDATE_CATALOG -eq 1 || $MIRROR_ALL -eq 1 ]]; then
+      echo "❌ --codes-from-controller/--list-controller-codes несовместимы с --update-catalog и --mirror-all" >&2
+      exit 2
+    fi
+    # Root нужен только для записи в кэш; list-режим — read-only, без root.
+    # Проверка ДО логина: не тратить обход сайтов, чтобы упасть на правах
+    if [[ $LIST_CONTROLLER_CODES -eq 0 ]] && ! is_root; then
+      echo "Требуются права root для режима контроллера." >&2
+      exit 1
+    fi
+    local controller_codes=""
+    if [[ $CODES_FROM_DB -eq 1 ]]; then
+      controller_codes=$(controller_fetch_codes_mongo) || exit 1
+    else
+      load_api_creds || exit 1
+      controller_login || exit 1
+      controller_codes=$(controller_fetch_codes) || { controller_logout; exit 1; }
+      controller_logout
+    fi
+    [[ -z "$controller_codes" ]] && { echo "❌ На контроллере не найдено adopted-устройств" >&2; exit 1; }
+    # --filter применяется и к кодам с контроллера
+    if [[ -n "$FILTER_REGEX" ]]; then
+      controller_codes=$(echo "$controller_codes" | tr ' ' '\n' | grep -E "$FILTER_REGEX" | tr '\n' ' ' | sed 's/ *$//') || true
+      [[ -z "$controller_codes" ]] && { echo "❌ После фильтра '$FILTER_REGEX' кодов не осталось" >&2; exit 1; }
+    fi
+    if [[ $LIST_CONTROLLER_CODES -eq 1 ]]; then
+      echo "📟 Коды adopted-устройств: $controller_codes"
+      exit 0
+    fi
+    # Объединить с кодами из --codes (union, дедупликация)
+    local merged
+    # shellcheck disable=SC2086
+    merged=$(printf '%s\n' ${CODES[@]+"${CODES[@]}"} $controller_codes | sed '/^$/d' | sort -u | tr '\n' ' ')
+    read -r -a CODES <<< "$merged"
+    FROM_CATALOG=1
+    echo "📟 Коды для кэширования: ${CODES[*]}"
+  fi
+
   # Режим обновления каталога (только обновить и выйти)
   if [[ $UPDATE_CATALOG -eq 1 && $MIRROR_ALL -eq 0 ]]; then
     echo "🔄 Режим обновления каталога"
