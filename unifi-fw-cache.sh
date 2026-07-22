@@ -867,16 +867,22 @@ controller_fetch_codes_mongo() {
   [[ -z "$mongo_cmd" ]] && command -v mongo >/dev/null 2>&1 && mongo_cmd="mongo"
   [[ -z "$mongo_cmd" ]] && { echo "❌ Для --codes-from-db требуется mongosh или mongo" >&2; return 1; }
   local codes=""
+  # print() даёт одинаковый сырой вывод (без кавычек) в mongosh и legacy mongo;
+  # $type: "string" отсекает записи с отсутствующим/null model
   if ! codes=$("$mongo_cmd" --quiet --port 27117 ace \
-      --eval 'db.device.distinct("model", {adopted: true}).join(" ")' 2>/dev/null | tail -n1); then
-    codes=""
-  fi
-  # Валидация: legacy mongo печатает ошибки коннекта в STDOUT — они не должны стать «кодами»
-  if [[ -z "$codes" || ! "$codes" =~ ^[A-Za-z0-9._+-]+([[:space:]][A-Za-z0-9._+-]+)*$ ]]; then
+      --eval 'print(db.device.distinct("model", {adopted: true, model: {$type: "string"}}).join(" "))' 2>/dev/null | tail -n1); then
     echo "❌ Не удалось получить коды из MongoDB (localhost:27117, db ace) — контроллер запущен?" >&2
     return 1
   fi
+  # Нормализация пробелов; ошибки коннекта legacy mongo печатает в STDOUT — валидируем
+  codes=$(echo "$codes" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ *$//')
+  if [[ -n "$codes" && ! "$codes" =~ ^[A-Za-z0-9._+-]+([[:space:]][A-Za-z0-9._+-]+)*$ ]]; then
+    echo "❌ Неожиданный вывод MongoDB — не похоже на коды устройств" >&2
+    return 1
+  fi
+  # Пустой список — легитимный результат (0 adopted); сообщение выдаёт вызывающий код
   echo "$codes"
+  return 0
 }
 
 process_from_catalog() {
