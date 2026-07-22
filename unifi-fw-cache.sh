@@ -702,6 +702,37 @@ get_filtered_codes() {
        '.[$v].release | keys[] | select(test($re))' "$CATALOG" | tr '\n' ' '
 }
 
+# --- Controller API (получение кодов adopted-устройств) ---
+
+# Свести учётные данные API: флаги > env > файл кредов
+load_api_creds() {
+  if [[ -n "$API_CREDS_FILE" ]]; then
+    [[ -r "$API_CREDS_FILE" ]] || { echo "❌ Файл кредов недоступен: $API_CREDS_FILE" >&2; return 1; }
+    local perms; perms=$(stat -c '%a' "$API_CREDS_FILE" 2>/dev/null || echo "")
+    if [[ -n "$perms" && "$perms" != "600" && "$perms" != "400" ]]; then
+      echo "⚠️ Файл кредов $API_CREDS_FILE имеет права $perms (рекомендуется 600)" >&2
+    fi
+    local key val
+    # `|| [[ -n "$key" ]]` — не потерять последнюю строку файла без завершающего \n
+    while IFS='=' read -r key val || [[ -n "$key" ]]; do
+      key="${key//[[:space:]]/}"
+      [[ -z "$key" || "$key" == \#* ]] && continue
+      val="${val%$'\r'}"  # CRLF из файлов, созданных на Windows
+      # Снять только ПАРНЫЕ обрамляющие кавычки
+      if [[ ${#val} -ge 2 && "$val" == \"*\" ]]; then val="${val:1:${#val}-2}"
+      elif [[ ${#val} -ge 2 && "$val" == \'*\' ]]; then val="${val:1:${#val}-2}"; fi
+      case "$key" in
+        UNIFI_API_URL)  [[ -z "$UNIFI_API_URL"  ]] && UNIFI_API_URL="$val" ;;
+        UNIFI_API_USER) [[ -z "$UNIFI_API_USER" ]] && UNIFI_API_USER="$val" ;;
+        UNIFI_API_PASS) [[ -z "$UNIFI_API_PASS" ]] && UNIFI_API_PASS="$val" ;;
+      esac
+    done < "$API_CREDS_FILE"
+  fi
+  UNIFI_API_URL="${UNIFI_API_URL:-https://localhost:8443}"
+  UNIFI_API_URL="$(normalize_host "$UNIFI_API_URL")"
+  return 0
+}
+
 process_from_catalog() {
   [[ -r "$CATALOG" ]] || { echo "Каталог не найден" >&2; exit 1; }
   
