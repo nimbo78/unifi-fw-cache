@@ -733,6 +733,93 @@ load_api_creds() {
   return 0
 }
 
+# Вход в API: сначала self-hosted (/api/login), затем UniFi OS (/api/auth/login)
+controller_login() {
+  command -v curl >/dev/null 2>&1 || { echo "❌ Для работы с API контроллера требуется curl" >&2; return 1; }
+  if [[ -z "$UNIFI_API_USER" || -z "$UNIFI_API_PASS" ]]; then
+    echo "❌ Не заданы учётные данные API (--api-user/--api-pass, env UNIFI_API_USER/UNIFI_API_PASS или --api-creds-file)" >&2
+    return 1
+  fi
+
+  API_COOKIE_JAR="$(mktemp)"
+  # Хост без схемы/порта/пути — для --noproxy (прокси не должен перехватывать API)
+  local noproxy_host="${UNIFI_API_URL#*://}"
+  if [[ "$noproxy_host" == \[* ]]; then
+    noproxy_host="${noproxy_host%%\]*}]"  # IPv6 в квадратных скобках
+  else
+    noproxy_host="${noproxy_host%%[:/]*}"
+  fi
+  API_CURL_ARGS=(-k -s --noproxy "$noproxy_host" --connect-timeout 10 --max-time 60 -c "$API_COOKIE_JAR" -b "$API_COOKIE_JAR")
+
+  # Пароль передаётся jq через окружение — не попадает в argv (не виден в ps)
+  local payload
+  payload=$(UNIFI_API_USER="$UNIFI_API_USER" UNIFI_API_PASS="$UNIFI_API_PASS" \
+    jq -n '{username: env.UNIFI_API_USER, password: env.UNIFI_API_PASS}')
+
+  local body headers
+  body="$(mktemp)"; headers="$(mktemp)"
+  # Темпфайлы удаляются при любом выходе из функции
+  trap 'rm -f "$body" "$headers" 2>/dev/null' RETURN
+
+  # 1) self-hosted: успех = HTTP 200 И meta.rc == "ok" (не доверять голому 200)
+  local code_self code_uos
+  code_self=$(printf '%s' "$payload" | curl "${API_CURL_ARGS[@]}" -o "$body" -w '%{http_code}' \
+    -H 'Content-Type: application/json' -d @- "$UNIFI_API_URL/api/login" || true)
+  code_self="${code_self:-000}"
+  if [[ "$code_self" == "200" ]] && jq -e '.meta.rc == "ok"' "$body" >/dev/null 2>&1; then
+    API_BASE="$UNIFI_API_URL"
+    echo "🔐 Вход выполнен (self-hosted API): $UNIFI_API_URL" >&2
+    return 0
+  fi
+  if [[ "$code_self" == "400" ]]; then
+    if grep -q 'Ubic2faTokenRequired' "$body" 2>/dev/null; then
+      echo "❌ У аккаунта включена 2FA — создайте локального администратора без 2FA" >&2
+    else
+      echo "❌ Контроллер отверг учётные данные (HTTP 400): проверьте логин/пароль" >&2
+    fi
+    return 1
+  fi
+
+  # 2) UniFi OS: /api/auth/login + CSRF-токен из заголовка ответа
+  code_uos=$(printf '%s' "$payload" | curl "${API_CURL_ARGS[@]}" -D "$headers" -o "$body" -w '%{http_code}' \
+    -H 'Content-Type: application/json' -d @- "$UNIFI_API_URL/api/auth/login" || true)
+  code_uos="${code_uos:-000}"
+  API_CSRF_TOKEN=$(awk -F': ' 'tolower($1)=="x-csrf-token"{gsub(/\r/,"",$2); print $2}' "$headers" | tail -n1)
+  if [[ "$code_uos" == "200" ]]; then
+    API_BASE="$UNIFI_API_URL/proxy/network"
+    echo "🔐 Вход выполнен (UniFi OS API): $UNIFI_API_URL" >&2
+    return 0
+  fi
+  if [[ "$code_uos" == "499" ]]; then
+    echo "❌ У аккаунта включена 2FA (HTTP 499) — создайте локального администратора без 2FA" >&2
+    return 1
+  fi
+
+  echo "❌ Не удалось войти в API ($UNIFI_API_URL): self-hosted HTTP $code_self, UniFi OS HTTP $code_uos" >&2
+  return 1
+}
+
+# GET-запрос к API с cookie (+CSRF для UniFi OS); тело ответа в stdout
+controller_api_get() {
+  local path="$1"
+  local -a hdr=()
+  [[ -n "$API_CSRF_TOKEN" ]] && hdr=(-H "X-Csrf-Token: $API_CSRF_TOKEN")
+  curl "${API_CURL_ARGS[@]}" ${hdr[@]+"${hdr[@]}"} "$API_BASE$path"
+}
+
+# Best-effort закрытие сессии (сессии не копятся при cron-запусках)
+controller_logout() {
+  [[ -z "$API_BASE" ]] && return 0
+  local -a hdr=()
+  [[ -n "$API_CSRF_TOKEN" ]] && hdr=(-H "X-Csrf-Token: $API_CSRF_TOKEN")
+  if [[ "$API_BASE" == *"/proxy/network" ]]; then
+    curl "${API_CURL_ARGS[@]}" ${hdr[@]+"${hdr[@]}"} -X POST -o /dev/null "$UNIFI_API_URL/api/auth/logout" 2>/dev/null || true
+  else
+    curl "${API_CURL_ARGS[@]}" ${hdr[@]+"${hdr[@]}"} -X POST -o /dev/null "$UNIFI_API_URL/api/logout" 2>/dev/null || true
+  fi
+  return 0
+}
+
 process_from_catalog() {
   [[ -r "$CATALOG" ]] || { echo "Каталог не найден" >&2; exit 1; }
   
