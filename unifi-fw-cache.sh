@@ -824,6 +824,61 @@ controller_logout() {
   return 0
 }
 
+# Обойти все сайты и собрать коды моделей ТОЛЬКО adopted-устройств
+controller_fetch_codes() {
+  local sites_json sites msg
+  sites_json=$(controller_api_get "/api/self/sites") || true
+  # Ошибки classic API приходят с "data": [] — проверяем meta.rc, а не наличие .data
+  if ! echo "$sites_json" | jq -e '.meta.rc == "ok"' >/dev/null 2>&1; then
+    msg=$(echo "$sites_json" | jq -r '.meta.msg // empty' 2>/dev/null || true)
+    echo "❌ Не удалось получить список сайтов контроллера${msg:+ ($msg)}" >&2
+    return 1
+  fi
+  sites=$(echo "$sites_json" | jq -r '.data[].name' 2>/dev/null || true)
+  [[ -z "$sites" ]] && { echo "❌ Список сайтов пуст" >&2; return 1; }
+
+  local all_codes="" site devices_json site_codes desc ok_sites=0
+  while IFS= read -r site; do
+    devices_json=$(controller_api_get "/api/s/$site/stat/device") || true
+    if ! echo "$devices_json" | jq -e '.meta.rc == "ok"' >/dev/null 2>&1; then
+      msg=$(echo "$devices_json" | jq -r '.meta.msg // empty' 2>/dev/null || true)
+      echo "⚠️ Сайт '$site': не удалось получить устройства${msg:+ ($msg)}, пропускаю" >&2
+      continue
+    fi
+    ok_sites=$((ok_sites + 1))
+    # Только реально adopted-устройства (не pending adoption)
+    site_codes=$(echo "$devices_json" | jq -r '.data[] | select(.adopted==true) | .model' 2>/dev/null | sort -u | tr '\n' ' ') || true
+    desc=$(echo "$sites_json" | jq -r --arg n "$site" '.data[] | select(.name==$n) | .desc' 2>/dev/null || true)
+    echo "🏢 Сайт '${desc:-$site}': ${site_codes:-нет adopted-устройств}" >&2
+    all_codes+="${site_codes}"$'\n'
+  done <<< "$sites"
+
+  if [[ $ok_sites -eq 0 ]]; then echo "❌ Не удалось опросить ни один сайт" >&2; return 1; fi
+  # sed вместо grep -v: grep фейлится под pipefail при пустом результате,
+  # а пустой список кодов — легитимный исход (обрабатывается в main)
+  echo "$all_codes" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ *$//'
+  return 0
+}
+
+# Альтернатива без учётки: локальный MongoDB контроллера (только на самой машине)
+controller_fetch_codes_mongo() {
+  local mongo_cmd=""
+  command -v mongosh >/dev/null 2>&1 && mongo_cmd="mongosh"
+  [[ -z "$mongo_cmd" ]] && command -v mongo >/dev/null 2>&1 && mongo_cmd="mongo"
+  [[ -z "$mongo_cmd" ]] && { echo "❌ Для --codes-from-db требуется mongosh или mongo" >&2; return 1; }
+  local codes=""
+  if ! codes=$("$mongo_cmd" --quiet --port 27117 ace \
+      --eval 'db.device.distinct("model", {adopted: true}).join(" ")' 2>/dev/null | tail -n1); then
+    codes=""
+  fi
+  # Валидация: legacy mongo печатает ошибки коннекта в STDOUT — они не должны стать «кодами»
+  if [[ -z "$codes" || ! "$codes" =~ ^[A-Za-z0-9._+-]+([[:space:]][A-Za-z0-9._+-]+)*$ ]]; then
+    echo "❌ Не удалось получить коды из MongoDB (localhost:27117, db ace) — контроллер запущен?" >&2
+    return 1
+  fi
+  echo "$codes"
+}
+
 process_from_catalog() {
   [[ -r "$CATALOG" ]] || { echo "Каталог не найден" >&2; exit 1; }
   
