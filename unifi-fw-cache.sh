@@ -707,7 +707,7 @@ get_filtered_codes() {
 # Свести учётные данные API: флаги > env > файл кредов
 load_api_creds() {
   if [[ -n "$API_CREDS_FILE" ]]; then
-    [[ -r "$API_CREDS_FILE" ]] || { echo "❌ Файл кредов недоступен: $API_CREDS_FILE" >&2; return 1; }
+    [[ -f "$API_CREDS_FILE" && -r "$API_CREDS_FILE" ]] || { echo "❌ Файл кредов недоступен или не является файлом: $API_CREDS_FILE" >&2; return 1; }
     local perms; perms=$(stat -c '%a' "$API_CREDS_FILE" 2>/dev/null || echo "")
     if [[ -n "$perms" && "$perms" != "600" && "$perms" != "400" ]]; then
       echo "⚠️ Файл кредов $API_CREDS_FILE имеет права $perms (рекомендуется 600)" >&2
@@ -718,6 +718,8 @@ load_api_creds() {
       key="${key//[[:space:]]/}"
       [[ -z "$key" || "$key" == \#* ]] && continue
       val="${val%$'\r'}"  # CRLF из файлов, созданных на Windows
+      # Обрезать пробелы по краям значения (пароль с пробелами — через кавычки)
+      val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
       # Снять только ПАРНЫЕ обрамляющие кавычки
       if [[ ${#val} -ge 2 && "$val" == \"*\" ]]; then val="${val:1:${#val}-2}"
       elif [[ ${#val} -ge 2 && "$val" == \'*\' ]]; then val="${val:1:${#val}-2}"; fi
@@ -1144,7 +1146,8 @@ main() {
       [[ -z "$controller_codes" ]] && { echo "❌ После фильтра '$FILTER_REGEX' кодов не осталось" >&2; exit 1; }
     fi
     if [[ $LIST_CONTROLLER_CODES -eq 1 ]]; then
-      echo "📟 Коды adopted-устройств: $controller_codes"
+      echo "📟 Коды adopted-устройств:" >&2
+      echo "$controller_codes"
       exit 0
     fi
     # Объединить с кодами из --codes (union, дедупликация)

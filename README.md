@@ -119,6 +119,8 @@ graph LR
 | 📥 **wget** | 1.14+ | Загрузка файлов с поддержкой докачки |
 | 🔑 **md5sum** | - | Проверка целостности файлов |
 | 📊 **coreutils** | 8.0+ | stat, install для управления файлами |
+| 🌀 **curl** | 7.x+ | Только для `--codes-from-controller` (API контроллера) |
+| 🍃 **mongosh/mongo** | - | Только для `--codes-from-db` (локальный MongoDB) |
 | ⚙️ **systemd** | - | Управление службой unifi (опционально) |
 | 👑 **root** | - | Доступ к /var/lib/unifi |
 

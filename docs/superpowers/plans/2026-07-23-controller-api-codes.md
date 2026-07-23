@@ -524,6 +524,7 @@ git commit -m "feat(controller-api): режимы --codes-from-controller/--list
 ## Runtime-чеклист для пользователя (на виртуалке с контроллером)
 
 1. `./unifi-fw-cache.sh --list-controller-codes --api-user <u> --api-pass <p>` — коды только adopted-устройств по всем сайтам (read-only, без root).
+1a. `CODES="$(./unifi-fw-cache.sh --list-controller-codes --api-user <u> --api-pass <p> 2>/dev/null)"` — в переменной чистый список кодов без декора.
 2. То же с заведомо неверным паролем — сообщение про HTTP 400 «проверьте логин/пароль» (не HTTP 404).
 3. То же с файлом кредов `--api-creds-file` (проверить предупреждение при правах ≠ 600; файл, созданный на Windows с CRLF, тоже должен работать).
 4. `sudo -E ./unifi-fw-cache.sh --codes-from-controller --api-creds-file ... --no-restart` — файлы появляются в `/var/lib/unifi/firmware/<код>/<версия>/`, `jq . /var/lib/unifi/firmware/firmware_meta.json` валиден.
