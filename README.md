@@ -140,6 +140,10 @@ chmod +x unifi-fw-cache.sh
 # 🎯 Кэшировать прошивки для конкретных устройств
 sudo ./unifi-fw-cache.sh --from-catalog --codes "UAP6MP U7PG2 UAL6"
 
+# 🔌 Или не перечислять коды вручную — скрипт сам спросит контроллер,
+#    какие устройства у вас adopted (по всем сайтам)
+sudo ./unifi-fw-cache.sh --codes-from-controller --api-user admin --api-pass 'секрет'
+
 # 🔗 Скачать прошивку по прямому URL (автоматически определит совместимые устройства)
 sudo ./unifi-fw-cache.sh https://dl.ui.com/unifi/firmware/U7PG2/6.7.35.15586/BZ.qca956x_6.7.35+15586.bin
 
@@ -175,6 +179,29 @@ sequenceDiagram
     S->>M: Update firmware_meta.json
     S->>UC: systemctl restart unifi
     UC-->>U: ✅ Firmware cached
+```
+
+### 🔌 Автоопределение устройств через API контроллера
+
+Не нужно помнить коды моделей — скрипт сам спросит контроллер, что у вас есть:
+
+```mermaid
+sequenceDiagram
+    participant U as 👤 User
+    participant S as 📜 Script
+    participant A as 🔐 Controller API
+    participant W as 🌐 Web
+    participant F as 📁 Cache
+
+    U->>S: --codes-from-controller
+    S->>A: Логин (self-hosted или UniFi OS)
+    A-->>S: Сессия
+    S->>A: Обход всех сайтов (multi-site)
+    A-->>S: Коды только adopted-устройств
+    S->>W: Скачивание прошивок (можно через прокси)
+    W-->>S: Файлы
+    S->>F: Кэш + firmware_meta.json
+    F-->>U: ✅ Прошивки ровно для ваших устройств
 ```
 
 ### 🌍 Режим зеркала
@@ -360,6 +387,9 @@ REWRITE_HOST=unifi-mirror.local.lan \
 | ♻️ `RESTART` | `1` | Перезапускать службу (1/0) |
 | 🌐 `REWRITE_HOST` | - | Заменить хост при загрузке |
 | 📂 `MIRROR_ROOT` | `.` | Корень для режима зеркала |
+| 🔌 `UNIFI_API_URL` | `https://localhost:8443` | Адрес контроллера для `--codes-from-controller` |
+| 👤 `UNIFI_API_USER` | - | Логин администратора API контроллера |
+| 🔑 `UNIFI_API_PASS` | - | Пароль администратора API (лучше через файл кредов) |
 
 ### 💡 Примеры использования переменных
 
@@ -398,6 +428,9 @@ bash -x ./unifi-fw-cache.sh --from-catalog --codes "UAP6MP"
 
 # 📋 Проверить содержимое каталога
 jq '.["9.0.131"].release | keys' /var/lib/unifi/firmware.json
+
+# 🔌 Проверить подключение к API контроллера (read-only, ничего не скачивает)
+./unifi-fw-cache.sh --list-controller-codes --api-creds-file /etc/unifi-fw-cache.creds
 ```
 
 ## 📊 Мониторинг
@@ -425,6 +458,10 @@ done
 # Добавить в crontab
 # 🌙 Ежедневное обновление кэша в 3:00
 0 3 * * * /opt/unifi-fw-cache/unifi-fw-cache.sh --from-catalog --codes "UAP6MP U7PG2 UAL6" >> /var/log/unifi-fw-cache.log 2>&1
+
+# 🔌 То же, но без хардкода кодов: скрипт сам узнаёт устройства у контроллера.
+#    Купили новую модель точки — прошивка для неё появится в кэше автоматически
+0 3 * * * /opt/unifi-fw-cache/unifi-fw-cache.sh --auto-update-catalog --codes-from-controller --api-creds-file /etc/unifi-fw-cache.creds >> /var/log/unifi-fw-cache.log 2>&1
 
 # 📅 Еженедельное полное зеркалирование
 0 2 * * 0 /opt/unifi-fw-cache/unifi-fw-cache.sh --mirror-all --mirror-root /srv/unifi-mirror >> /var/log/unifi-mirror.log 2>&1
@@ -608,6 +645,45 @@ chown unifi:unifi /var/lib/unifi/firmware/firmware_meta.json
 # На контроллере:
 # Использует firmware.json → скачивает с fw.local (вашего зеркала)
 ```
+
+### 🔌 Как настроить получение кодов с контроллера?
+
+**Разовая настройка (2 минуты):**
+
+```bash
+# 1️⃣ Создайте в UniFi локального администратора БЕЗ 2FA
+#    (достаточно роли с правами только на чтение)
+
+# 2️⃣ Сохраните учётные данные в файл
+sudo tee /etc/unifi-fw-cache.creds >/dev/null <<'CREDS'
+UNIFI_API_URL=https://localhost:8443
+UNIFI_API_USER=fw-cache
+UNIFI_API_PASS=ваш-пароль
+CREDS
+sudo chmod 600 /etc/unifi-fw-cache.creds
+
+# 3️⃣ Проверьте подключение (read-only: ничего не скачивает и не меняет)
+./unifi-fw-cache.sh --list-controller-codes --api-creds-file /etc/unifi-fw-cache.creds
+
+# 4️⃣ Готово — кэшируйте одной командой
+sudo ./unifi-fw-cache.sh --codes-from-controller --api-creds-file /etc/unifi-fw-cache.creds
+```
+
+Работает и с self-hosted контроллером (порт 8443), и с UniFi OS консолями (UDM/Cloud Key) — тип API определяется автоматически. Креды можно передать и флагами (`--api-user/--api-pass`) или переменными окружения (`UNIFI_API_USER/UNIFI_API_PASS`), но файл удобнее для cron и не светит пароль в истории команд.
+
+### 🔐 Скрипт пишет про 2FA и не логинится
+
+**Симптомы:** `❌ У аккаунта включена 2FA — создайте локального администратора без 2FA`.
+
+**Решение:** вход в API с двухфакторной аутентификацией не поддерживается. Создайте в контроллере отдельного **локального** администратора без 2FA (достаточно прав только на чтение) и укажите его в файле кредов. Ваш основной админ-аккаунт с 2FA при этом остаётся как есть.
+
+### 🏢 Какие устройства попадают в выборку с контроллера?
+
+- ✅ Только **adopted** — те, которыми контроллер реально управляет
+- ✅ Со **всех сайтов** (multi-site); сайт с ошибкой пропускается с предупреждением, остальные обрабатываются
+- ❌ Устройства в состоянии «pending adoption» не учитываются
+- 💡 Сузить выборку можно фильтром: `--codes-from-controller --filter '^U'`
+- 💡 На самой виртуалке с контроллером можно вообще без учётки: `--codes-from-db` (читает локальный MongoDB, нужен mongosh/mongo)
 
 ## 🤝 Вклад в проект
 
