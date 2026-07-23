@@ -35,6 +35,19 @@ LAST_FILE_INDEX=-1
 NEED_CONTROLLER=0
 FILTER_REGEX=""
 
+# Интеграция с API контроллера (--codes-from-controller)
+CODES_FROM_CONTROLLER=0
+LIST_CONTROLLER_CODES=0
+CODES_FROM_DB=0
+API_CREDS_FILE=""
+UNIFI_API_URL="${UNIFI_API_URL:-}"    # default https://localhost:8443 подставляется в load_api_creds
+UNIFI_API_USER="${UNIFI_API_USER:-}"
+UNIFI_API_PASS="${UNIFI_API_PASS:-}"
+API_COOKIE_JAR=""
+API_CSRF_TOKEN=""
+API_BASE=""
+API_CURL_ARGS=()
+
 # Кэш каталога для find_compatible_devices
 CATALOG_CACHE=""
 CATALOG_CACHE_FILE=""
@@ -44,7 +57,7 @@ CATALOG_CACHE_VERSION=""
 TEMP_META_FILE="$(mktemp)"
 DOWNLOAD_LIST="$(mktemp)"
 
-cleanup() { rm -f "$TEMP_META_FILE" "$DOWNLOAD_LIST"; }
+cleanup() { rm -f "$TEMP_META_FILE" "$DOWNLOAD_LIST" ${API_COOKIE_JAR:+"$API_COOKIE_JAR"}; }
 trap cleanup EXIT
 
 # --- Утилиты ---
@@ -97,6 +110,21 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
   --max-catalog-age DAYS      Максимальный возраст каталога в днях (default: 20)
   --no-catalog-backup         Не создавать резервную копию при обновлении
 
+🔌 Интеграция с контроллером (коды adopted-устройств, multi-site):
+  --codes-from-controller     Получить коды adopted-устройств через API и кэшировать
+                              прошивки для них (включает --from-catalog; коды
+                              объединяются с --codes; --filter применяется)
+  --list-controller-codes     Только показать найденные коды и выйти (без root).
+                              stdout — итоговый список, разбивка по сайтам — stderr
+  --api-url URL               Адрес контроллера (default: https://localhost:8443)
+  --api-user USER             Логин локального администратора (2FA не поддерживается —
+                              создайте локального админа без 2FA)
+  --api-pass PASS             Пароль (видно в ps; лучше env или файл кредов)
+  --api-creds-file PATH       Файл KEY=VALUE с UNIFI_API_URL/USER/PASS (chmod 600)
+  --codes-from-db             Альтернатива без учётки: локальный MongoDB контроллера
+                              (localhost:27117, нужен mongosh/mongo); API-креды
+                              при этом игнорируются
+
 🔧 Дополнительные опции:
   --src-dir PATH              Директория с локальными файлами прошивок
   --src-url URL [FILE]        Сопоставить URL с локальным файлом
@@ -120,6 +148,9 @@ Usage: $(basename "$0") [OPTIONS] [URL_or_FILE ...]
   DOWNLOAD_THREADS            Количество потоков (default: 5)
   MAX_CATALOG_AGE             Максимальный возраст каталога в днях (default: 20)
   CATALOG_BACKUP              Делать резервные копии (1/0, default: 1)
+  UNIFI_API_URL               Адрес контроллера для --codes-from-controller
+  UNIFI_API_USER              Логин администратора API
+  UNIFI_API_PASS              Пароль администратора API
 
 💡 Примеры использования:
 
@@ -201,6 +232,13 @@ while [[ $# -gt 0 ]]; do
     --update-catalog) UPDATE_CATALOG=1; shift ;;
     --auto-update-catalog) AUTO_UPDATE_CATALOG=1; shift ;;
     --fetch-catalog-api) FETCH_CATALOG_API=1; shift ;;
+    --codes-from-controller) CODES_FROM_CONTROLLER=1; shift ;;
+    --list-controller-codes) LIST_CONTROLLER_CODES=1; shift ;;
+    --codes-from-db) CODES_FROM_DB=1; CODES_FROM_CONTROLLER=1; shift ;;
+    --api-url) shift; UNIFI_API_URL="${1:-}"; shift || true ;;
+    --api-user) shift; UNIFI_API_USER="${1:-}"; shift || true ;;
+    --api-pass) shift; UNIFI_API_PASS="${1:-}"; shift || true ;;
+    --api-creds-file) shift; API_CREDS_FILE="${1:-}"; shift || true ;;
     --catalog-url) shift; CATALOG_URL="${1:-$CATALOG_URL}"; shift || true ;;
     --max-catalog-age) shift; MAX_CATALOG_AGE="${1:-20}"; shift || true ;;
     --no-catalog-backup) CATALOG_BACKUP=0; shift ;;
@@ -294,8 +332,6 @@ rewrite_catalog_hosts() {
   new_host=$(normalize_host "$new_host")
 
   local tmp_catalog; tmp_catalog="$(mktemp)"
-  # Очистка временного файла при выходе из функции
-  trap 'rm -f "$tmp_catalog" 2>/dev/null' RETURN
 
   echo "🔄 Переписывание хостов на: $new_host"
 
@@ -317,6 +353,7 @@ rewrite_catalog_hosts() {
 
     if [[ ! -s "$tmp_catalog" ]] || ! jq empty "$tmp_catalog" 2>/dev/null; then
       echo "❌ Ошибка при переписывании хостов" >&2
+      rm -f "$tmp_catalog"
       return 1
     fi
   fi
@@ -327,7 +364,8 @@ rewrite_catalog_hosts() {
     return 0
   else
     echo "❌ Ошибка при переписывании хостов: невалидный JSON" >&2
-    return 1  # trap RETURN удалит tmp_catalog
+    rm -f "$tmp_catalog"
+    return 1
   fi
 }
 
@@ -664,6 +702,191 @@ get_filtered_codes() {
        '.[$v].release | keys[] | select(test($re))' "$CATALOG" | tr '\n' ' '
 }
 
+# --- Controller API (получение кодов adopted-устройств) ---
+
+# Свести учётные данные API: флаги > env > файл кредов
+load_api_creds() {
+  if [[ -n "$API_CREDS_FILE" ]]; then
+    [[ -f "$API_CREDS_FILE" && -r "$API_CREDS_FILE" ]] || { echo "❌ Файл кредов недоступен или не является файлом: $API_CREDS_FILE" >&2; return 1; }
+    local perms; perms=$(stat -c '%a' "$API_CREDS_FILE" 2>/dev/null || echo "")
+    if [[ -n "$perms" && "$perms" != "600" && "$perms" != "400" ]]; then
+      echo "⚠️ Файл кредов $API_CREDS_FILE имеет права $perms (рекомендуется 600)" >&2
+    fi
+    local key val
+    # `|| [[ -n "$key" ]]` — не потерять последнюю строку файла без завершающего \n
+    while IFS='=' read -r key val || [[ -n "$key" ]]; do
+      key="${key//[[:space:]]/}"
+      [[ -z "$key" || "$key" == \#* ]] && continue
+      val="${val%$'\r'}"  # CRLF из файлов, созданных на Windows
+      # Обрезать пробелы по краям значения (пароль с пробелами — через кавычки)
+      val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+      # Снять только ПАРНЫЕ обрамляющие кавычки
+      if [[ ${#val} -ge 2 && "$val" == \"*\" ]]; then val="${val:1:${#val}-2}"
+      elif [[ ${#val} -ge 2 && "$val" == \'*\' ]]; then val="${val:1:${#val}-2}"; fi
+      case "$key" in
+        UNIFI_API_URL)  [[ -z "$UNIFI_API_URL"  ]] && UNIFI_API_URL="$val" ;;
+        UNIFI_API_USER) [[ -z "$UNIFI_API_USER" ]] && UNIFI_API_USER="$val" ;;
+        UNIFI_API_PASS) [[ -z "$UNIFI_API_PASS" ]] && UNIFI_API_PASS="$val" ;;
+      esac
+    done < "$API_CREDS_FILE"
+  fi
+  UNIFI_API_URL="${UNIFI_API_URL:-https://localhost:8443}"
+  UNIFI_API_URL="$(normalize_host "$UNIFI_API_URL")"
+  return 0
+}
+
+# Вход в API: сначала self-hosted (/api/login), затем UniFi OS (/api/auth/login)
+controller_login() {
+  command -v curl >/dev/null 2>&1 || { echo "❌ Для работы с API контроллера требуется curl" >&2; return 1; }
+  if [[ -z "$UNIFI_API_USER" || -z "$UNIFI_API_PASS" ]]; then
+    echo "❌ Не заданы учётные данные API (--api-user/--api-pass, env UNIFI_API_USER/UNIFI_API_PASS или --api-creds-file)" >&2
+    return 1
+  fi
+
+  API_COOKIE_JAR="$(mktemp)"
+  # Хост без схемы/порта/пути — для --noproxy (прокси не должен перехватывать API)
+  local noproxy_host="${UNIFI_API_URL#*://}"
+  if [[ "$noproxy_host" == \[* ]]; then
+    noproxy_host="${noproxy_host%%\]*}]"  # IPv6 в квадратных скобках
+  else
+    noproxy_host="${noproxy_host%%[:/]*}"
+  fi
+  API_CURL_ARGS=(-k -s --noproxy "$noproxy_host" --connect-timeout 10 --max-time 60 -c "$API_COOKIE_JAR" -b "$API_COOKIE_JAR")
+
+  # Пароль передаётся jq через окружение — не попадает в argv (не виден в ps)
+  local payload
+  payload=$(UNIFI_API_USER="$UNIFI_API_USER" UNIFI_API_PASS="$UNIFI_API_PASS" \
+    jq -n '{username: env.UNIFI_API_USER, password: env.UNIFI_API_PASS}')
+
+  local body headers
+  body="$(mktemp)"; headers="$(mktemp)"
+  # Темпфайлы удаляются явно перед каждым return
+
+  # 1) self-hosted: успех = HTTP 200 И meta.rc == "ok" (не доверять голому 200)
+  local code_self code_uos
+  code_self=$(printf '%s' "$payload" | curl "${API_CURL_ARGS[@]}" -o "$body" -w '%{http_code}' \
+    -H 'Content-Type: application/json' -d @- "$UNIFI_API_URL/api/login" || true)
+  code_self="${code_self:-000}"
+  if [[ "$code_self" == "200" ]] && jq -e '.meta.rc == "ok"' "$body" >/dev/null 2>&1; then
+    API_BASE="$UNIFI_API_URL"
+    echo "🔐 Вход выполнен (self-hosted API): $UNIFI_API_URL" >&2
+    rm -f "$body" "$headers"
+    return 0
+  fi
+  if [[ "$code_self" == "400" ]]; then
+    if grep -q 'Ubic2faTokenRequired' "$body" 2>/dev/null; then
+      echo "❌ У аккаунта включена 2FA — создайте локального администратора без 2FA" >&2
+    else
+      echo "❌ Контроллер отверг учётные данные (HTTP 400): проверьте логин/пароль" >&2
+    fi
+    rm -f "$body" "$headers"
+    return 1
+  fi
+
+  # 2) UniFi OS: /api/auth/login + CSRF-токен из заголовка ответа
+  code_uos=$(printf '%s' "$payload" | curl "${API_CURL_ARGS[@]}" -D "$headers" -o "$body" -w '%{http_code}' \
+    -H 'Content-Type: application/json' -d @- "$UNIFI_API_URL/api/auth/login" || true)
+  code_uos="${code_uos:-000}"
+  API_CSRF_TOKEN=$(awk -F': ' 'tolower($1)=="x-csrf-token"{gsub(/\r/,"",$2); print $2}' "$headers" | tail -n1)
+  if [[ "$code_uos" == "200" ]]; then
+    API_BASE="$UNIFI_API_URL/proxy/network"
+    echo "🔐 Вход выполнен (UniFi OS API): $UNIFI_API_URL" >&2
+    rm -f "$body" "$headers"
+    return 0
+  fi
+  if [[ "$code_uos" == "499" ]]; then
+    echo "❌ У аккаунта включена 2FA (HTTP 499) — создайте локального администратора без 2FA" >&2
+    rm -f "$body" "$headers"
+    return 1
+  fi
+
+  echo "❌ Не удалось войти в API ($UNIFI_API_URL): self-hosted HTTP $code_self, UniFi OS HTTP $code_uos" >&2
+  rm -f "$body" "$headers"
+  return 1
+}
+
+# GET-запрос к API с cookie (+CSRF для UniFi OS); тело ответа в stdout
+controller_api_get() {
+  local path="$1"
+  local -a hdr=()
+  [[ -n "$API_CSRF_TOKEN" ]] && hdr=(-H "X-Csrf-Token: $API_CSRF_TOKEN")
+  curl "${API_CURL_ARGS[@]}" ${hdr[@]+"${hdr[@]}"} "$API_BASE$path"
+}
+
+# Best-effort закрытие сессии (сессии не копятся при cron-запусках)
+controller_logout() {
+  [[ -z "$API_BASE" ]] && return 0
+  local -a hdr=()
+  [[ -n "$API_CSRF_TOKEN" ]] && hdr=(-H "X-Csrf-Token: $API_CSRF_TOKEN")
+  if [[ "$API_BASE" == *"/proxy/network" ]]; then
+    curl "${API_CURL_ARGS[@]}" ${hdr[@]+"${hdr[@]}"} -X POST -o /dev/null "$UNIFI_API_URL/api/auth/logout" 2>/dev/null || true
+  else
+    curl "${API_CURL_ARGS[@]}" ${hdr[@]+"${hdr[@]}"} -X POST -o /dev/null "$UNIFI_API_URL/api/logout" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# Обойти все сайты и собрать коды моделей ТОЛЬКО adopted-устройств
+controller_fetch_codes() {
+  local sites_json sites msg
+  sites_json=$(controller_api_get "/api/self/sites") || true
+  # Ошибки classic API приходят с "data": [] — проверяем meta.rc, а не наличие .data
+  if ! echo "$sites_json" | jq -e '.meta.rc == "ok"' >/dev/null 2>&1; then
+    msg=$(echo "$sites_json" | jq -r '.meta.msg // empty' 2>/dev/null || true)
+    echo "❌ Не удалось получить список сайтов контроллера${msg:+ ($msg)}" >&2
+    return 1
+  fi
+  sites=$(echo "$sites_json" | jq -r '.data[].name' 2>/dev/null || true)
+  [[ -z "$sites" ]] && { echo "❌ Список сайтов пуст" >&2; return 1; }
+
+  local all_codes="" site devices_json site_codes desc ok_sites=0
+  while IFS= read -r site; do
+    devices_json=$(controller_api_get "/api/s/$site/stat/device") || true
+    if ! echo "$devices_json" | jq -e '.meta.rc == "ok"' >/dev/null 2>&1; then
+      msg=$(echo "$devices_json" | jq -r '.meta.msg // empty' 2>/dev/null || true)
+      echo "⚠️ Сайт '$site': не удалось получить устройства${msg:+ ($msg)}, пропускаю" >&2
+      continue
+    fi
+    ok_sites=$((ok_sites + 1))
+    # Только реально adopted-устройства (не pending adoption)
+    site_codes=$(echo "$devices_json" | jq -r '.data[] | select(.adopted==true) | .model' 2>/dev/null | sort -u | tr '\n' ' ') || true
+    desc=$(echo "$sites_json" | jq -r --arg n "$site" '.data[] | select(.name==$n) | .desc' 2>/dev/null || true)
+    echo "🏢 Сайт '${desc:-$site}': ${site_codes:-нет adopted-устройств}" >&2
+    all_codes+="${site_codes}"$'\n'
+  done <<< "$sites"
+
+  if [[ $ok_sites -eq 0 ]]; then echo "❌ Не удалось опросить ни один сайт" >&2; return 1; fi
+  # sed вместо grep -v: grep фейлится под pipefail при пустом результате,
+  # а пустой список кодов — легитимный исход (обрабатывается в main)
+  echo "$all_codes" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ *$//'
+  return 0
+}
+
+# Альтернатива без учётки: локальный MongoDB контроллера (только на самой машине)
+controller_fetch_codes_mongo() {
+  local mongo_cmd=""
+  command -v mongosh >/dev/null 2>&1 && mongo_cmd="mongosh"
+  [[ -z "$mongo_cmd" ]] && command -v mongo >/dev/null 2>&1 && mongo_cmd="mongo"
+  [[ -z "$mongo_cmd" ]] && { echo "❌ Для --codes-from-db требуется mongosh или mongo" >&2; return 1; }
+  local codes=""
+  # print() даёт одинаковый сырой вывод (без кавычек) в mongosh и legacy mongo;
+  # $type: "string" отсекает записи с отсутствующим/null model
+  if ! codes=$("$mongo_cmd" --quiet --port 27117 ace \
+      --eval 'print(db.device.distinct("model", {adopted: true, model: {$type: "string"}}).join(" "))' 2>/dev/null | tail -n1); then
+    echo "❌ Не удалось получить коды из MongoDB (localhost:27117, db ace) — контроллер запущен?" >&2
+    return 1
+  fi
+  # Нормализация пробелов; ошибки коннекта legacy mongo печатает в STDOUT — валидируем
+  codes=$(echo "$codes" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ *$//')
+  if [[ -n "$codes" && ! "$codes" =~ ^[A-Za-z0-9._+-]+([[:space:]][A-Za-z0-9._+-]+)*$ ]]; then
+    echo "❌ Неожиданный вывод MongoDB — не похоже на коды устройств" >&2
+    return 1
+  fi
+  # Пустой список — легитимный результат (0 adopted); сообщение выдаёт вызывающий код
+  echo "$codes"
+  return 0
+}
+
 process_from_catalog() {
   [[ -r "$CATALOG" ]] || { echo "Каталог не найден" >&2; exit 1; }
   
@@ -677,6 +900,14 @@ process_from_catalog() {
   fi
   
   echo "Найдено устройств для кэша: ${#target_codes[@]}"
+
+  # Предупредить о кодах, которых нет в каталоге прошивок
+  local catalog_keys missing=() c
+  catalog_keys=$(jq -r --arg v "$APP_VERSION" '.[$v].release | keys[]' "$CATALOG" 2>/dev/null || true)
+  for c in "${target_codes[@]}"; do
+    grep -Fqx "$c" <<< "$catalog_keys" || missing+=("$c")
+  done
+  [[ ${#missing[@]} -gt 0 ]] && echo "⚠️ Нет в каталоге прошивок (пропускаются): ${missing[*]}" >&2
 
   local json_codes; json_codes=$(printf '%s\n' "${target_codes[@]}" | jq -R . | jq -s .)
   local tasks; tasks=$(jq -r --arg v "$APP_VERSION" --argjson target_codes "$json_codes" '
@@ -886,6 +1117,48 @@ process_manual_sources() {
 }
 
 main() {
+  # Получение кодов adopted-устройств с контроллера
+  if [[ $CODES_FROM_CONTROLLER -eq 1 || $LIST_CONTROLLER_CODES -eq 1 ]]; then
+    # Несовместимые комбинации — до обращения к API
+    if [[ $UPDATE_CATALOG -eq 1 || $MIRROR_ALL -eq 1 ]]; then
+      echo "❌ --codes-from-controller/--list-controller-codes несовместимы с --update-catalog и --mirror-all" >&2
+      exit 2
+    fi
+    # Root нужен только для записи в кэш; list-режим — read-only, без root.
+    # Проверка ДО логина: не тратить обход сайтов, чтобы упасть на правах
+    if [[ $LIST_CONTROLLER_CODES -eq 0 ]] && ! is_root; then
+      echo "Требуются права root для режима контроллера." >&2
+      exit 1
+    fi
+    local controller_codes=""
+    if [[ $CODES_FROM_DB -eq 1 ]]; then
+      controller_codes=$(controller_fetch_codes_mongo) || exit 1
+    else
+      load_api_creds || exit 1
+      controller_login || exit 1
+      controller_codes=$(controller_fetch_codes) || { controller_logout; exit 1; }
+      controller_logout
+    fi
+    [[ -z "$controller_codes" ]] && { echo "❌ На контроллере не найдено adopted-устройств" >&2; exit 1; }
+    # --filter применяется и к кодам с контроллера
+    if [[ -n "$FILTER_REGEX" ]]; then
+      controller_codes=$(echo "$controller_codes" | tr ' ' '\n' | grep -E "$FILTER_REGEX" | tr '\n' ' ' | sed 's/ *$//') || true
+      [[ -z "$controller_codes" ]] && { echo "❌ После фильтра '$FILTER_REGEX' кодов не осталось" >&2; exit 1; }
+    fi
+    if [[ $LIST_CONTROLLER_CODES -eq 1 ]]; then
+      echo "📟 Коды adopted-устройств:" >&2
+      echo "$controller_codes"
+      exit 0
+    fi
+    # Объединить с кодами из --codes (union, дедупликация)
+    local merged
+    # shellcheck disable=SC2086
+    merged=$(printf '%s\n' ${CODES[@]+"${CODES[@]}"} $controller_codes | sed '/^$/d' | sort -u | tr '\n' ' ')
+    read -r -a CODES <<< "$merged"
+    FROM_CATALOG=1
+    echo "📟 Коды для кэширования: ${CODES[*]}"
+  fi
+
   # Режим обновления каталога (только обновить и выйти)
   if [[ $UPDATE_CATALOG -eq 1 && $MIRROR_ALL -eq 0 ]]; then
     echo "🔄 Режим обновления каталога"
